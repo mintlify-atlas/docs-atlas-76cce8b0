@@ -30,11 +30,11 @@ const redis = Redis.createClient();
 const stelar = new StelarServer({ port: 3000, tcpPort: 3001 });
 
 // When a broadcast happens on this instance, publish to Redis
-stelar.onAll((ctx) => {
+stelar.onAll(({ event, data }) => {
   redis.publish('stelar:events', JSON.stringify({
-    event: ctx.eventName,
-    data: ctx.data,
-    excludeId: ctx.id,
+    event: event,
+    data: data.data,
+    excludeId: data.id,
   }));
 });
 
@@ -71,14 +71,16 @@ console.log(stats);
 //   totalMessagesReceived: 5000,
 //   totalMessagesSent: 4800,
 //   totalRooms: 12,
-//   uptime: 3600000,
-//   uptimeSeconds: 3600,
+//   uptime: 3600000,       // milliseconds since server start
 //   wsConnections: 38,
 //   tcpConnections: 4,
-//   memoryMB: 10.54,
 //   memoryUsage: { heapUsed: ..., heapTotal: ..., rss: ..., external: ... },
 //   rateLimiterEntries: 42
 // }
 ```
 
 You can expose this data through the built-in `/health` endpoint or via a custom health handler. In a multi-instance setup, scrape `getStats()` from each instance and aggregate the results to get a cluster-wide view of connections, throughput, and memory.
+
+<Note>
+  The `/health` HTTP endpoint spreads the `getStats()` fields and adds two convenience fields: `uptimeSeconds` (integer seconds) and `memoryMB` (heap used in MB). These fields are **only present in the HTTP response** — `getStats()` itself returns `uptime` in milliseconds and a full `memoryUsage` object (`NodeJS.MemoryUsage`) with `heapUsed`, `heapTotal`, `rss`, and `external`.
+</Note>

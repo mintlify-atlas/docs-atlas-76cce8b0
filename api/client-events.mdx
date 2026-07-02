@@ -1,7 +1,7 @@
 ---
-title: "StelarClient Built-In Events Reference"
+title: "StelarClient Built-In Events and Connection States"
 sidebarTitle: "Client Events"
-description: "Reference for all built-in StelarClient lifecycle events — connect, disconnect, reconnecting, reconnect_failed, and error."
+description: "Reference for all five built-in StelarClient lifecycle events, the four-state connection state machine, and the onMessageQueued and onQueueDrained hooks."
 ---
 
 `StelarClient` emits several built-in lifecycle events in addition to any server-defined application events. Register handlers for them exactly as you would for any other event — using `.on()`, `.once()`, or `.off()`. None of these event names are reserved at the protocol level, so you should not use them as custom application event names on your server.
@@ -26,16 +26,20 @@ This is the correct place to perform any one-time setup after a successful conne
 
 ### `'disconnect'`
 
-Fires when the connection is lost, whether initiated by the server, a network drop, or a local call to `.disconnect()`. For WebSocket connections the handler receives a `{ code, reason }` object matching the [WebSocket close frame](https://www.rfc-editor.org/rfc/rfc6455#section-5.5.1). For TCP connections the argument is `undefined`.
+Fires when the connection is lost, whether initiated by the server, a network drop, or a local call to `.disconnect()`. The argument depends on the transport:
+
+- **Browser WebSocket** — receives `{ code: number, reason: string }` from the native WebSocket close frame per [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455#section-5.5.1).
+- **Node.js WebSocket** — receives `undefined` (the TCP socket close event carries no close-frame metadata in this path).
+- **TCP mode** — receives `undefined`.
 
 ```typescript
 client.on('disconnect', (info) => {
-  // info = { code: number, reason: string } for WebSocket
-  // info = undefined for TCP
+  // info = { code: number, reason: string } in browser WebSocket only
+  // info = undefined in Node.js WebSocket or TCP mode
   if (info) {
     console.warn(`Disconnected: code=${info.code} reason="${info.reason}"`);
   } else {
-    console.warn('TCP connection closed');
+    console.warn('Connection closed');
   }
 });
 ```
@@ -104,7 +108,7 @@ client.on('connect', () => {
 });
 
 client.on('disconnect', (info) => {
-  const detail = info ? `code=${info.code}` : 'TCP close';
+  const detail = info ? `code=${info.code}` : 'no close code';
   console.warn(`⚠️  Disconnected (${detail})`);
   updateStatusIndicator('disconnected');
 });
@@ -154,7 +158,7 @@ console.log(client.getState()); // 'connected'
 | `'connecting'` | `'connected'` | Handshake succeeded |
 | `'connecting'` | `'reconnecting'` | Handshake failed, `reconnection: true` |
 | `'connecting'` | `'disconnected'` | Handshake failed, `reconnection: false` |
-| `'connected'` | `'disconnected'` | `.disconnect()` called manually |
+| `'connected'` | `'disconnected'` | `.disconnect()` called manually, or socket closed with `reconnection: false` |
 | `'connected'` | `'reconnecting'` | Socket closed unexpectedly, `reconnection: true` |
 | `'reconnecting'` | `'connecting'` | Retry delay elapsed, next attempt starting |
 | `'reconnecting'` | `'disconnected'` | Max attempts reached, or `.disconnect()` called |
@@ -223,6 +227,6 @@ Returns the number of messages currently waiting in the queue.
 console.log('Pending offline messages:', client.getQueueSize());
 ```
 
-<Warning>
-  Setting `messageQueueSize: 0` **disables the message queue entirely**. Any `.emit()` call made while disconnected will be silently dropped — even if `reconnection: true`. Use this only when stale messages must never be delivered out of order (e.g. real-time cursor positions or ephemeral game state).
-</Warning>
+<Note>
+  `messageQueueSize` defaults to `100` if not set or if set to a falsy value. To minimize the queue footprint, set it to a small positive number such as `1`. Lowering the size means older messages are discarded sooner when many calls pile up while disconnected.
+</Note>

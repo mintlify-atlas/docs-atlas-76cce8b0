@@ -4,7 +4,7 @@ sidebarTitle: "Introduction"
 description: "stelar-time-real is a zero-dependency Node.js real-time library implementing WebSocket (RFC 6455) and a custom binary TCP protocol using only built-in modules."
 ---
 
-stelar-time-real is a production-grade real-time communication library built entirely from scratch for Node.js. It implements its own WebSocket protocol (RFC 6455) **and** a custom binary TCP protocol using only Node.js built-in modules — `http`, `net`, `crypto`, and `tls`. No `ws` package, no `engine.io`, no external dependencies of any kind. Every byte that travels across the network is controlled by the library, giving you total predictability, zero supply-chain risk, and no breaking changes from third-party updates.
+stelar-time-real is a production-grade real-time communication library built entirely from scratch for Node.js. It implements its own WebSocket protocol (RFC 6455) **and** a custom binary TCP protocol using only Node.js built-in modules — `http`, `net`, `crypto`, `tls`, and `zlib`. No `ws` package, no `engine.io`, no external dependencies of any kind. Every byte that travels across the network is controlled by the library, giving you total predictability, zero supply-chain risk, and no breaking changes from third-party updates.
 
 ## Key Features
 
@@ -13,7 +13,7 @@ stelar-time-real is a production-grade real-time communication library built ent
     `dependencies: {}`. No external packages — pure Node.js built-ins only. Instant installation, no vulnerability surface from third-party code.
   </Card>
   <Card title="Dual Protocol" icon="arrows-split-up-and-left">
-    WebSocket (RFC 6455) for browsers and TCP binary protocol for Node.js microservices run simultaneously on separate ports, sharing all server logic.
+    WebSocket (RFC 6455) for browsers and a custom binary TCP protocol for Node.js microservices run simultaneously on separate ports, sharing all server logic.
   </Card>
   <Card title="Rate Limiting" icon="gauge-high">
     Token-bucket rate limiter per client, per event, or per IP address. Swap it out entirely with a custom `IRateLimiter` (Redis, MongoDB, etc.).

@@ -1,5 +1,5 @@
 ---
-title: "StelarClient Configuration Options Reference"
+title: "StelarClient Options: Complete Configuration Reference"
 sidebarTitle: "Client Options"
 description: "Complete reference for all StelarClient constructor options including reconnection, protocol mode, ACK timeout, message queue, and TLS."
 ---
@@ -125,7 +125,7 @@ new StelarClient(3000)                       // → ws://localhost:3000
   Whether to reject TLS connections with an invalid or self-signed certificate. Set to `false` in development environments with self-signed certs. Defaults to `true`. Only applies in Node.js; browsers always validate certificates.
 </ParamField>
 
-<ParamField body="headers" type="{}">
+<ParamField body="headers" type="Record<string, string>">
   Custom HTTP headers to include in the WebSocket upgrade handshake request. Useful for passing authentication tokens or custom metadata. Only works in Node.js; browsers do not support custom WebSocket headers.
 
   ```javascript
@@ -133,6 +133,20 @@ new StelarClient(3000)                       // → ws://localhost:3000
     'Authorization': 'Bearer my-token',
     'X-Client-Version': '2.0.0',
   }
+  ```
+</ParamField>
+
+---
+
+## Compression
+
+<ParamField body="compression" type="boolean">
+  Enable `permessage-deflate` WebSocket compression on the client. The client will advertise compression support in the upgrade handshake; frames are compressed only when the server also supports and negotiates it. Defaults to `false`. No effect in TCP mode.
+
+  ```javascript
+  const client = new StelarClient('wss://app.example.com', {
+    compression: true,
+  });
   ```
 </ParamField>
 
@@ -260,6 +274,9 @@ const client = new StelarClient('wss://app.example.com', {
   headers: {
     'Authorization': `Bearer ${getAuthToken()}`,
   },
+
+  // Compression
+  compression: false,
 
   // Custom reconnect: linear back-off capped at 10s
   customReconnectDelay: (attempt, base) => Math.min(base * attempt, 10000),

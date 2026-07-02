@@ -1,7 +1,7 @@
 ---
-title: "StelarClient — Complete Method Reference"
+title: "StelarClient API — Full Method and Options Reference"
 sidebarTitle: "StelarClient"
-description: "Full reference for all StelarClient methods — connection, sending, rooms, ACK requests, state/metrics, and runtime config."
+description: "Full reference for every StelarClient method — connection lifecycle, event listeners, sending messages, rooms, ACK request/response, and state metrics."
 ---
 
 `StelarClient` connects to a `StelarServer` via WebSocket (default) or custom binary TCP. It works in both browser and Node.js environments without any external dependencies. The client ships with automatic reconnection using exponential backoff, a configurable message queue that persists sends across disconnections, and a Promise-based ACK request/response system.
@@ -12,8 +12,8 @@ description: "Full reference for all StelarClient methods — connection, sendin
 // Named export (recommended)
 import { StelarClient } from 'stelar-time-real';
 
-// Client-only subpath
-import { StelarClient } from 'stelar-time-real/client';
+// Client-only subpath (default export)
+import StelarClient from 'stelar-time-real/client';
 ```
 
 ## Constructor
@@ -29,9 +29,13 @@ The first argument accepts several formats:
 | `number` | `ws://localhost:<port>` | `new StelarClient(3000)` |
 | `"host:port"` | `ws://host:port` | `new StelarClient('localhost:3000')` |
 | `"ws://…"` / `"wss://…"` | WebSocket (plain / TLS) | `new StelarClient('wss://api.example.com')` |
-| `"host:port"` with `mode: 'tcp'` | Custom binary TCP | `new StelarClient('localhost:3001', { mode: 'tcp' })` |
+| `"host:port"` with `mode: 'tcp'` | Custom binary TCP | `new StelarClient('localhost:3000', { mode: 'tcp' })` |
 
 When no argument is provided the client defaults to `ws://localhost:3000`.
+
+<Note>
+  In TCP mode the client always connects to **WebSocket port + 1**. Pass the WebSocket port in the URL — for example, `'localhost:3000'` with `mode: 'tcp'` connects to TCP port `3001`. If no port is specified, the TCP port defaults to `3001`.
+</Note>
 
 **Options** (`StelarClientOptions`):
 
@@ -482,7 +486,7 @@ getOptions(): Readonly<{
   messageQueueSize: number;
   compression: boolean;
   hasCustomReconnectDelay: boolean;
-  hooks: string[];  // names of registered hook keys
+  hooks: string[];         // names of registered hook keys
 }>
 ```
 

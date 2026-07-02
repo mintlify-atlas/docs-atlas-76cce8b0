@@ -1,7 +1,7 @@
 ---
-title: "StelarContext — Event Handler Context Object"
+title: "StelarContext — Event Handler Context Reference"
 sidebarTitle: "StelarContext"
-description: "StelarContext is passed to every event handler, containing client info, received data, and all send/room/metadata methods."
+description: "StelarContext is passed to every event handler in stelar-time-real. Contains client identity, received payload, and all send, room, and metadata methods."
 ---
 
 Every handler registered with `.on()`, `.onAck()`, `.onConnection()`, `.onDisconnect()`, or `.use()` receives a single `StelarContext` object as its only argument. It bundles the client's identity, the received payload, and every action you can take in response — sending messages, managing rooms, storing metadata, and sending ACK replies.
@@ -54,20 +54,28 @@ server.on('chat', (ctx) => {
   The event name that triggered this handler invocation.
 </ResponseField>
 
+<ResponseField name="error" type="Error | undefined">
+  Set when the context is passed to an `error` event handler (registered via `server.on('error', handler)`). `undefined` for all other events.
+</ResponseField>
+
+<ResponseField name="_correlationId" type="string | undefined">
+  Internal identifier attached to ACK request-response cycles. Present when the incoming message is part of an ACK exchange (set by the client-side `request()` call). Used by `ctx.send()` to route the reply back to the correct pending request. Rarely needed in application code.
+</ResponseField>
+
 <ResponseField name="clientInfo" type="StelarClientInfo">
   Full metadata record for this client. See the sub-fields below.
 
   <Expandable title="StelarClientInfo fields">
+    <ResponseField name="clientInfo.id" type="string">
+      The unique string ID assigned to this client. Same value as `ctx.id`.
+    </ResponseField>
+
     <ResponseField name="clientInfo.rooms" type="Set<string>">
       The set of room names this client is currently a member of.
     </ResponseField>
 
-    <ResponseField name="clientInfo.metadata" type="Map<string, unknown>">
-      Arbitrary key-value store for application data (roles, user IDs, session tokens, etc). Write with `ctx.setMetadata()`, read with `ctx.getMetadata()`.
-    </ResponseField>
-
-    <ResponseField name="clientInfo.remoteAddress" type="string">
-      The client's IP address. Respects `X-Forwarded-For` for WebSocket clients behind proxies.
+    <ResponseField name="clientInfo.lastPing" type="number">
+      Unix timestamp (milliseconds) of the last successful PING/PONG heartbeat exchange. Used internally to detect stale connections.
     </ResponseField>
 
     <ResponseField name="clientInfo.protocol" type="'ws' | 'tcp'">
@@ -78,12 +86,20 @@ server.on('chat', (ctx) => {
       Unix timestamp (milliseconds) of when the client connected.
     </ResponseField>
 
+    <ResponseField name="clientInfo.metadata" type="Map<string, unknown>">
+      Arbitrary key-value store for application data (roles, user IDs, session tokens, etc). Write with `ctx.setMetadata()`, read with `ctx.getMetadata()`.
+    </ResponseField>
+
     <ResponseField name="clientInfo.messagesReceived" type="number">
       Total number of messages received from this client since connection.
     </ResponseField>
 
     <ResponseField name="clientInfo.messagesSent" type="number">
       Total number of messages sent to this client since connection.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.remoteAddress" type="string">
+      The client's IP address. Respects `X-Forwarded-For` for WebSocket clients behind proxies.
     </ResponseField>
   </Expandable>
 </ResponseField>

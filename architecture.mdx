@@ -4,7 +4,7 @@ sidebarTitle: "Architecture"
 description: "How stelar-time-real runs WebSocket (RFC 6455) and a custom 7-byte binary TCP protocol simultaneously, sharing rooms, ACK, middleware, and metrics across both."
 ---
 
-stelar-time-real is designed around a single principle: total control over the network layer. Rather than wrapping a third-party WebSocket library, it implements RFC 6455 from scratch using Node.js `http` and `crypto`, and pairs it with a purpose-built binary TCP protocol implemented over `net` (and optionally `tls`). Both transports are first-class citizens — they share the same event handlers, rooms, broadcast system, ACK system, middleware stack, and metrics.
+stelar-time-real is designed around a single principle: total control over the network layer. Rather than wrapping a third-party WebSocket library, it implements RFC 6455 from scratch using Node.js `http`, `crypto`, and `zlib`, and pairs it with a purpose-built binary TCP protocol implemented over `net` (and optionally `tls`). Both transports are first-class citizens — they share the same event handlers, rooms, broadcast system, ACK system, middleware stack, and metrics.
 
 ## Dual Protocol
 
@@ -57,23 +57,25 @@ The custom TCP protocol uses a compact 7-byte fixed header followed by a variabl
 
 ### Frame Types
 
-| Code | Name | Description |
-|---|---|---|
-| `0` | JSON | Event with a JSON-encoded payload |
-| `1` | Binary | Event with a raw binary payload (no JSON encoding) |
-| `2` | Ping | Client heartbeat request |
-| `3` | Pong | Server heartbeat response |
-| `4` | ACK Request | Request that expects a response from the server |
-| `5` | ACK Response | Server's response to an ACK Request |
-| `6` | Connect | Initial connection frame (server sends assigned client ID) |
-| `7` | Disconnect | Graceful disconnection frame |
-| `8` | Join Room | Client requests to join a named room |
-| `9` | Leave Room | Client requests to leave a named room |
-| `10` | Error | Error frame from server to client |
+All 11 frame type codes are defined as sequential hex values starting at `0x01` in `src/protocol.ts`:
+
+| Code | Hex | Name | Description |
+|---|---|---|---|
+| `1` | `0x01` | JSON | Event with a JSON-encoded payload |
+| `2` | `0x02` | Binary | Event with a raw binary payload (no JSON encoding) |
+| `3` | `0x03` | Ping | Client heartbeat request |
+| `4` | `0x04` | Pong | Server heartbeat response |
+| `5` | `0x05` | ACK Request | Request that expects a response from the server |
+| `6` | `0x06` | ACK Response | Server's response to an ACK Request |
+| `7` | `0x07` | Connect | Initial connection frame (server sends assigned client ID) |
+| `8` | `0x08` | Disconnect | Graceful disconnection frame |
+| `9` | `0x09` | Join Room | Client requests to join a named room |
+| `10` | `0x0A` | Leave Room | Client requests to leave a named room |
+| `11` | `0x0B` | Error | Error frame from server to client |
 
 ## WebSocket Implementation (RFC 6455)
 
-stelar-time-real implements the full WebSocket handshake and framing layer using only Node.js `http` and `crypto`. The `ws` npm package is never used.
+stelar-time-real implements the full WebSocket handshake and framing layer using only Node.js `http`, `crypto`, and `zlib`. The `ws` npm package is never used.
 
 The implementation covers:
 
@@ -81,9 +83,10 @@ The implementation covers:
 - **Framing** — Full frame parsing and construction for text, binary, ping, pong, and close opcodes
 - **Masking** — Applies and removes the XOR mask required on client-to-server frames (RFC 6455 §5.3)
 - **Fragmentation** — Correctly assembles fragmented multi-frame messages
-- **Close codes** — All standard close codes supported (`1000`, `1001`, `1002`, `1007`, `1008`, `1009`, etc.)
-- **RSV bit validation** — Frames with unexpected RSV bits set are rejected with a protocol error close
+- **Close codes** — All standard close codes supported (`1000`, `1001`, `1002`, `1003`, `1007`, `1008`, `1009`, `1011`, etc.)
+- **RSV bit validation** — Frames with unexpected RSV2/RSV3 bits set are rejected with a protocol error close
 - **PING / PONG** — Server responds to client PING frames with a PONG containing the same payload
+- **permessage-deflate** — Optional per-message compression (RFC 7692) using Node.js `zlib`; negotiated during the handshake via `Sec-WebSocket-Extensions`
 
 <Note>
   No external `ws` package is used at any point. All WebSocket framing logic lives in `src/websocket.ts` and relies exclusively on Node.js built-in modules. This means no third-party CVEs can affect the WebSocket layer.

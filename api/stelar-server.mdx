@@ -1,7 +1,7 @@
 ---
-title: "StelarServer — Complete Method Reference"
+title: "StelarServer API — Complete Method Reference"
 sidebarTitle: "StelarServer"
-description: "Full reference for all StelarServer methods — events, broadcasting, room management, lifecycle, metrics, and runtime config."
+description: "Complete API reference for StelarServer — event listeners, broadcasting, room management, lifecycle, metrics, and runtime configuration."
 ---
 
 `StelarServer` is the main class of stelar-time-real. Instantiate it with an options object, call `.start()` to bind the server, and register event handlers to respond to clients. A single `StelarServer` instance handles both WebSocket (RFC 6455) and custom binary TCP connections simultaneously.
@@ -264,7 +264,7 @@ console.log(stats);
 //   totalMessagesReceived: 5000,
 //   totalMessagesSent: 4800,
 //   totalRooms: 12,
-//   uptime: 3600000,
+//   uptime: 3600000,          // milliseconds since start
 //   wsConnections: 38,
 //   tcpConnections: 4,
 //   memoryUsage: { heapUsed: 11062016, heapTotal: 17301504, rss: 24576000, external: 1245184 },
@@ -340,7 +340,7 @@ server.start((port) => {
 
 ### `.stop()`
 
-Immediately destroys all active sockets, clears all rooms, removes internal timers and signal handlers, and closes the HTTP and TCP servers. Use `.gracefulShutdown` in options or listen to `SIGTERM` via `.onShutdown()` for a graceful drain instead.
+Immediately destroys all active sockets, clears all rooms, removes internal timers and signal handlers, and closes the HTTP and TCP servers. For a graceful drain, set `gracefulShutdown: true` in `StelarOptions` — the server will then capture `SIGINT`/`SIGTERM`, wait for connections to close (up to `shutdownTimeout` ms), and call any callbacks registered via `.onShutdown()` when complete.
 
 ```typescript
 server.stop(): this

@@ -121,7 +121,7 @@ stelar.use((ctx, next) => {
 });
 
 stelar.onConnection((client) => {
-  console.log(`[${client.protocol}] Connected: ${client.id} from ${client.remoteAddress}`);
+  console.log(`[${client.clientInfo.protocol}] Connected: ${client.id} from ${client.clientInfo.remoteAddress}`);
   client.setMetadata('role', 'user');
   client.emit('welcome', { id: client.id });
 });
@@ -175,7 +175,7 @@ client.joinRoom('random');
 
 stelar-time-real ships with bundled type declarations — no `@types/*` package needed:
 
-```javascript
+```typescript
 import { StelarServer, StelarClient, StelarStats } from 'stelar-time-real';
 
 const server: StelarServer = new StelarServer({ port: 3000 });
@@ -185,7 +185,7 @@ const client: StelarClient = new StelarClient('localhost:3000');
 ```
 
 <Tip>
-  Use `mode: 'tcp'` on the client for server-to-server communication. The binary TCP protocol has a 7-byte header (versus up to 14 bytes for WebSocket framing), making it ideal for high-throughput microservice messaging.
+  Use `mode: 'tcp'` on the client for server-to-server communication. The binary TCP protocol has a fixed 7-byte header (versus 2–14 bytes for WebSocket framing), making it ideal for high-throughput microservice messaging.
 
   ```javascript
   const client = new StelarClient('localhost:3001', {

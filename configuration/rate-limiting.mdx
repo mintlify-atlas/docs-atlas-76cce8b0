@@ -1,5 +1,5 @@
 ---
-title: "Rate Limiting: Global, Per-Event, and Per-Client"
+title: "Rate Limiting: Global, Per-Event, and Per-Client Rules"
 sidebarTitle: "Rate Limiting"
 description: "Token-bucket rate limiting with global, per-event, and per-client overrides; custom IRateLimiter interface for Redis and other backends."
 ---
@@ -103,8 +103,8 @@ When a message arrives, rate-limit checks are evaluated in this order — the fi
 
 1. **Per-client override** — `setClientRateLimit(id, config)`
 2. **Event-specific limit** — `eventRateLimits` map
-3. **Global limit** — `rateLimit` option
-4. **Custom rate limiter** — `customRateLimiter` option
+3. **Custom rate limiter** — `customRateLimiter` option
+4. **Global limit** — `rateLimit` option
 
 ---
 

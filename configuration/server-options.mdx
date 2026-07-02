@@ -1,5 +1,5 @@
 ---
-title: "StelarServer Configuration Options Reference"
+title: "StelarServer Options: Complete Configuration Reference"
 sidebarTitle: "Server Options"
 description: "Complete reference for all StelarServer constructor options including port, limits, rate limiting, TLS, health check, and logging."
 ---
@@ -77,7 +77,7 @@ await stelar.start();
 
 ## Rate Limiting
 
-<ParamField body="rateLimit" type="{ maxPoints: number; windowMs: number } | false">
+<ParamField body="rateLimit" type="{ maxPoints?: number; windowMs?: number } | false">
   Global token-bucket rate limit applied to every connected client. `maxPoints` is the maximum number of messages allowed per `windowMs` millisecond window.
 
   Set to `false` to disable the built-in rate limiter entirely. Defaults to `{ maxPoints: 100, windowMs: 1000 }`.
