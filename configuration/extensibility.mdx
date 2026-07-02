@@ -1,0 +1,340 @@
+---
+title: "Extend stelar-time-real with Custom Components"
+sidebarTitle: "Extensibility"
+description: "Replace the built-in rate limiter, IP tracker, health handler, and client ID generator with your own implementations for Redis, custom IDs, and more."
+---
+
+stelar-time-real exposes interfaces to replace every core component that manages state or makes decisions. This is ideal for Redis-backed distributed stores, custom client ID formats, IP blocklist databases, and specialized health checks.
+
+All custom components are passed as options to `new StelarServer({...})` and can be changed at runtime via `stelar.updateConfig({...})`.
+
+---
+
+## Custom Rate Limiter
+
+Replace the built-in token-bucket rate limiter by implementing the `IRateLimiter` interface:
+
+```typescript
+interface IRateLimiter {
+  check(id: string, cost?: number): boolean; // Return false to block the message
+  reset(id: string): void;                   // Called when a client disconnects
+  cleanup(): void;                           // Called every 30 seconds automatically
+  size(): number;                            // Number of currently tracked entries
+}
+```
+
+### Redis Example
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+class RedisRateLimiter {
+  constructor(redisClient) {
+    this.redis = redisClient;
+  }
+
+  async check(id, cost = 1) {
+    const key = `ratelimit:${id}`;
+    const current = await this.redis.incr(key);
+    if (current === 1) {
+      // Start the 1-second window on first message
+      await this.redis.expire(key, 1);
+    }
+    return current <= 100; // 100 messages per second
+  }
+
+  async reset(id) {
+    await this.redis.del(`ratelimit:${id}`);
+  }
+
+  async cleanup() {
+    // Redis handles key expiration automatically — nothing needed here
+  }
+
+  async size() {
+    return 0; // TTL-based keys make this non-applicable
+  }
+}
+
+const stelar = new StelarServer({
+  port: 3000,
+  customRateLimiter: new RedisRateLimiter(redisClient),
+  // rateLimit is automatically disabled when customRateLimiter is provided
+});
+```
+
+Because the rate-limit state lives in Redis, all instances of your application share the same counters — a client cannot bypass the limit by connecting to a different pod.
+
+<Tip>
+  Combine a custom rate limiter with the `onRateLimitExceeded` hook for a complete anti-abuse system: the limiter provides consistent distributed enforcement, while the hook handles logging, alerting, and progressive banning (e.g. warn three times, then ban on the fourth violation).
+</Tip>
+
+---
+
+## Custom IP Tracker
+
+Replace the per-IP connection counter by implementing `IIPTracker`:
+
+```typescript
+interface IIPTracker {
+  check(ip: string): boolean;    // Return false to reject a new connection
+  add(ip: string): void;         // Called when a connection is accepted
+  remove(ip: string): void;      // Called when a connection closes
+  getCount(ip: string): number;  // Returns current connection count for an IP
+  cleanup(): void;               // Called every 30 seconds
+}
+```
+
+### Blocklist and VIP Example
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+class CustomIPTracker {
+  constructor() {
+    // IPs that are permanently blocked
+    this.blockedIPs = new Set(['1.2.3.4', '5.6.7.8']);
+    // IPs with no connection limit (internal services, monitoring)
+    this.vipIPs     = new Set(['10.0.0.1', '10.0.0.2']);
+    this.counts     = new Map();
+  }
+
+  check(ip) {
+    if (this.blockedIPs.has(ip)) return false; // Always block
+    if (this.vipIPs.has(ip))     return true;  // No limit for VIPs
+    return (this.counts.get(ip) ?? 0) < 20;    // 20 connections for everyone else
+  }
+
+  add(ip) {
+    this.counts.set(ip, (this.counts.get(ip) ?? 0) + 1);
+  }
+
+  remove(ip) {
+    const count = this.counts.get(ip) ?? 0;
+    if (count <= 1) this.counts.delete(ip);
+    else            this.counts.set(ip, count - 1);
+  }
+
+  getCount(ip) {
+    return this.counts.get(ip) ?? 0;
+  }
+
+  cleanup() {
+    for (const [ip, count] of this.counts) {
+      if (count <= 0) this.counts.delete(ip);
+    }
+  }
+
+  // Utility: block an IP at runtime
+  block(ip) { this.blockedIPs.add(ip); }
+  unblock(ip) { this.blockedIPs.delete(ip); }
+}
+
+const tracker = new CustomIPTracker();
+
+const stelar = new StelarServer({
+  port: 3000,
+  customIPTracker: tracker,
+});
+
+// You can also block IPs dynamically from a hook:
+stelar.updateConfig({
+  hooks: {
+    onRateLimitExceeded: ({ clientId }) => {
+      const ip = stelar.getClients().find(c => c.id === clientId)?.remoteAddress;
+      if (ip) tracker.block(ip);
+    },
+  },
+});
+```
+
+---
+
+## Custom Client ID Generator
+
+By default, stelar-time-real generates a UUID v4 for each connected client. Provide `generateClientId` to use your own format:
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+
+  // Timestamp + random suffix — sortable and human-readable
+  generateClientId: () => {
+    const ts  = Date.now().toString(36);
+    const rnd = Math.random().toString(36).slice(2, 8);
+    return `${ts}_${rnd}`;
+    // Example: "lp7c3k2z_a4f8e1"
+  },
+});
+```
+
+Other ideas:
+
+```javascript
+// Monotonic counter (simple, not distributed-safe)
+let counter = 0;
+generateClientId: () => `client_${++counter}`
+
+// Prefixed UUID
+import { randomUUID } from 'crypto';
+generateClientId: () => `usr_${randomUUID()}`
+
+// Encode metadata into the ID (region + timestamp)
+generateClientId: () => `eu-west_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+```
+
+The ID is sent to the client immediately after connection and is accessible as `client.getId()` on the `StelarClient`.
+
+---
+
+## Custom Health Check Handler
+
+Replace the built-in `/health` endpoint with your own handler to include database status, disk space, cache health, or any other signal your orchestrator needs:
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+
+  customHealthHandler: async (req, res, stats) => {
+    // stats = full StelarStats object (connections, uptime, memory, etc.)
+
+    const dbConnected = await checkDatabase();
+    const diskSpaceMB = checkDiskSpace();
+    const cacheOk     = await checkRedisCache();
+
+    const healthy = dbConnected && diskSpaceMB > 100 && cacheOk;
+
+    res.writeHead(healthy ? 200 : 503, {
+      'Content-Type': 'application/json',
+    });
+
+    res.end(JSON.stringify({
+      status:       healthy ? 'healthy' : 'degraded',
+      version:      '3.3.0',
+      database:     dbConnected ? 'connected' : 'disconnected',
+      cache:        cacheOk     ? 'connected' : 'disconnected',
+      diskSpaceMB,
+      server: {
+        activeConnections:  stats.activeConnections,
+        totalRooms:         stats.totalRooms,
+        uptimeSeconds:      Math.floor(stats.uptime / 1000),
+        memoryMB:           Math.round(stats.memoryUsage.heapUsed / 1024 / 1024),
+      },
+    }));
+  },
+});
+```
+
+The handler receives the raw Node.js `IncomingMessage` and `ServerResponse` — you have full control over headers, status codes, and response body.
+
+---
+
+## Runtime Configuration
+
+Change server configuration on the fly without restarting or dropping connections:
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  maxConnections: 100,
+  rateLimit: { maxPoints: 50, windowMs: 1000 },
+});
+await stelar.start();
+
+// Later: scale up for a traffic spike
+stelar.updateConfig({
+  maxConnections:  1000,
+  maxRooms:        5000,
+  rateLimit:       { maxPoints: 200, windowMs: 1000 },
+  allowedOrigins:  ['https://app.example.com', 'https://admin.example.com'],
+});
+
+// Swap in a Redis-backed rate limiter after startup
+stelar.updateConfig({
+  customRateLimiter: new RedisRateLimiter(redisClient),
+});
+
+// Replace hooks at runtime (merges with existing hooks)
+stelar.updateConfig({
+  hooks: {
+    onRateLimitExceeded: ({ clientId }) => {
+      banUser(clientId);
+      return false; // Already handled — skip the default disconnect
+    },
+  },
+});
+```
+
+### Inspect Current Configuration
+
+```javascript
+const config = stelar.getConfig();
+console.log(config);
+// {
+//   maxConnections: 1000,
+//   maxConnectionsPerIP: 50,
+//   maxRooms: 5000,
+//   maxRoomsPerClient: 50,
+//   maxPayloadSize: 10485760,
+//   heartbeatInterval: 30000,
+//   heartbeatTimeout: 60000,
+//   connectTimeout: 10000,
+//   shutdownTimeout: 10000,
+//   compression: false,
+//   hasCustomRateLimiter: true,
+//   hasCustomIPTracker: false,
+//   hasCustomClientIdGenerator: false,
+//   hasCustomHealthHandler: true,
+//   eventRateLimits: ['chat', 'file-upload'],
+//   hooks: ['onRateLimitExceeded', 'onClientConnect'],
+//   allowedOrigins: ['https://app.example.com', 'https://admin.example.com'],
+// }
+```
+
+---
+
+## Custom Reconnect Delay (Client)
+
+Control the exact reconnection schedule on `StelarClient` with `customReconnectDelay`:
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('localhost:3000', {
+  reconnection:         true,
+  reconnectionAttempts: 20,
+
+  // Option 1: custom function — overrides exponential backoff entirely
+  customReconnectDelay: (attempt, baseDelay, maxDelay) => {
+    if (attempt <= 3)  return 200;    // Ultra-fast first retries
+    if (attempt <= 10) return 2000;   // Medium delay for next 7
+    return 30000;                     // Slow for everything after
+  },
+});
+```
+
+The same behavior is available via the `onReconnectDelay` hook, which has the advantage of being updatable at runtime:
+
+```javascript
+// Option 2: via hook — can be changed via updateOptions()
+const client = new StelarClient('localhost:3000', {
+  hooks: {
+    onReconnectDelay: ({ attempt, defaultDelay }) => {
+      // Linear back-off capped at 10 seconds instead of exponential
+      return Math.min(1000 * attempt, 10000);
+    },
+  },
+});
+
+// Update the strategy at runtime
+client.updateOptions({
+  hooks: {
+    onReconnectDelay: ({ attempt }) => {
+      // After a user action: switch to aggressive reconnection
+      return attempt <= 5 ? 300 : 5000;
+    },
+  },
+});
+```
+
+When both `customReconnectDelay` and `onReconnectDelay` are set, the hook takes priority.

@@ -1,0 +1,324 @@
+---
+title: "StelarClient Configuration Options Reference"
+sidebarTitle: "Client Options"
+description: "Complete reference for all StelarClient constructor options including reconnection, protocol mode, ACK timeout, message queue, and TLS."
+---
+
+All configuration options are passed as the second argument to `new StelarClient(url, {...})`. The first argument is the server URL or port. Every option is optional.
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('localhost:3000', { /* options here */ });
+client.connect();
+```
+
+The URL argument accepts multiple formats:
+
+```javascript
+new StelarClient('localhost:3000')           // → ws://localhost:3000
+new StelarClient('ws://example.com:3000')    // WebSocket URL
+new StelarClient('wss://secure.example.com') // Secure WebSocket
+new StelarClient(3000)                       // → ws://localhost:3000
+```
+
+---
+
+## Reconnection
+
+<ParamField body="reconnection" type="boolean">
+  Whether to automatically reconnect after a disconnection. When `true`, the client uses exponential backoff with jitter between attempts. Defaults to `true`.
+</ParamField>
+
+<ParamField body="reconnectionAttempts" type="number">
+  Maximum number of reconnection attempts before giving up and emitting `'reconnect_failed'`. Defaults to `10`. Set to `Infinity` to retry forever.
+</ParamField>
+
+<ParamField body="reconnectionDelay" type="number">
+  Base delay in milliseconds for the first reconnection attempt. Each subsequent attempt uses exponential backoff: `base × 1.5^(attempt - 1)`, capped at `maxReconnectionDelay`. Defaults to `1000` (1 s).
+</ParamField>
+
+<ParamField body="maxReconnectionDelay" type="number">
+  Maximum delay in milliseconds between reconnection attempts. The exponential backoff will not exceed this value. A random jitter of ±20% is applied to avoid thundering herd on server restart. Defaults to `30000` (30 s).
+</ParamField>
+
+---
+
+## Protocol
+
+<ParamField body="mode" type="'ws' | 'tcp'">
+  Protocol mode. `'ws'` uses the WebSocket protocol (RFC 6455) and works in both browsers and Node.js. `'tcp'` uses the custom binary protocol and is Node.js only — lower overhead, lower latency, ideal for server-to-server communication. Defaults to `'ws'`.
+
+  ```javascript
+  // TCP mode — Node.js only
+  const client = new StelarClient('localhost:3001', { mode: 'tcp' });
+  ```
+
+  In TCP mode, the client automatically connects to `port + 1` relative to the WebSocket URL unless a full TCP address is provided.
+</ParamField>
+
+<ParamField body="maxPayloadSize" type="number">
+  Maximum outgoing message payload size in bytes. Messages exceeding this are silently dropped. Defaults to `10485760` (10 MB).
+</ParamField>
+
+<ParamField body="maxFrameSize" type="number">
+  Maximum incoming WebSocket frame size in bytes that the client will accept. Frames larger than this trigger a parse error. Defaults to `10485760` (10 MB).
+</ParamField>
+
+---
+
+## Heartbeat
+
+<ParamField body="heartbeatInterval" type="number">
+  How often (in milliseconds) the client sends a heartbeat to keep the connection alive. Defaults to `30000` (30 s). Should generally match the server's `heartbeatInterval` or be lower.
+</ParamField>
+
+---
+
+## ACK (Request-Response)
+
+<ParamField body="ackTimeout" type="number">
+  Timeout in milliseconds for ACK promises created by `client.request(...)`. If the server does not respond within this window, the promise is rejected with a timeout error. Defaults to `5000` (5 s).
+
+  ```javascript
+  const client = new StelarClient('localhost:3000', { ackTimeout: 10000 });
+
+  try {
+    const result = await client.request('getUser', { id: 1 }, 'getUser');
+  } catch (err) {
+    // Thrown after 10 seconds if no response
+    console.error(err.message); // "ACK 'getUser' timeout"
+  }
+  ```
+</ParamField>
+
+---
+
+## Message Queue
+
+<ParamField body="messageQueueSize" type="number">
+  Number of messages to buffer when the client is disconnected. When the client reconnects, buffered messages are flushed automatically in order. If the queue is full, the oldest message is discarded to make room. Defaults to `100`.
+
+  Messages are only queued when `reconnection` is `true`. The `onMessageQueued` hook fires for each queued message; `onQueueDrained` fires when all queued messages have been sent after reconnection.
+</ParamField>
+
+---
+
+## Security
+
+<ParamField body="tls" type="boolean">
+  Enable TLS for the connection. When `true`, WebSocket connections use `wss://` and TCP connections use TLS. Has no effect in browsers (use a `wss://` URL directly). Defaults to `false`.
+
+  ```javascript
+  // Secure WebSocket from Node.js
+  const client = new StelarClient('wss://secure.example.com', { tls: true });
+
+  // Secure TCP
+  const client = new StelarClient('secure.example.com:3001', {
+    mode: 'tcp',
+    tls: true,
+  });
+  ```
+</ParamField>
+
+<ParamField body="rejectUnauthorized" type="boolean">
+  Whether to reject TLS connections with an invalid or self-signed certificate. Set to `false` in development environments with self-signed certs. Defaults to `true`. Only applies in Node.js; browsers always validate certificates.
+</ParamField>
+
+<ParamField body="headers" type="{}">
+  Custom HTTP headers to include in the WebSocket upgrade handshake request. Useful for passing authentication tokens or custom metadata. Only works in Node.js; browsers do not support custom WebSocket headers.
+
+  ```javascript
+  headers: {
+    'Authorization': 'Bearer my-token',
+    'X-Client-Version': '2.0.0',
+  }
+  ```
+</ParamField>
+
+---
+
+## Logging
+
+<ParamField body="logger" type="'debug' | 'info' | 'warn' | 'error' | 'silent' | Logger | false">
+  Controls client-side logging. Pass a log level string, a `Logger` instance, or `false` to disable. Defaults to `'warn'`.
+</ParamField>
+
+---
+
+## Hooks
+
+<ParamField body="hooks" type="StelarClientHooks">
+  Lifecycle callbacks for client events. Returning `false` from `onBeforeEmit` cancels the send. See the [Hooks reference](/configuration/hooks) for the full list of client hooks and their signatures.
+
+  ```javascript
+  hooks: {
+    onStateChange: ({ from, to }) => {
+      if (to === 'reconnecting') showReconnectBanner();
+      if (to === 'connected')    hideReconnectBanner();
+    },
+    onBeforeEmit: ({ event, data }) => {
+      if (event === 'debug') return false; // Suppress in production
+    },
+    onError: ({ error, context }) => {
+      errorTracker.capture(error, { context });
+    },
+  }
+  ```
+</ParamField>
+
+<ParamField body="customReconnectDelay" type="(attempt, baseDelay, maxDelay) => number">
+  A function that returns the delay (in milliseconds) before the next reconnection attempt. Overrides the built-in exponential backoff. Receives the current attempt number, the configured `reconnectionDelay`, and `maxReconnectionDelay`.
+
+  ```javascript
+  customReconnectDelay: (attempt, baseDelay, maxDelay) => {
+    if (attempt <= 3)  return 200;   // Fast retry for first 3 attempts
+    if (attempt <= 10) return 2000;
+    return 30000;
+  }
+  ```
+
+  The same behaviour can be achieved at runtime via the `onReconnectDelay` hook.
+</ParamField>
+
+---
+
+## Runtime Configuration
+
+### updateOptions()
+
+Change client options without reconnecting. All options except `mode`, `tls`, and `rejectUnauthorized` can be updated at runtime.
+
+```javascript
+const client = new StelarClient('localhost:3000');
+client.connect();
+
+// Later: increase limits and change hooks
+client.updateOptions({
+  heartbeatInterval: 15000,
+  ackTimeout:        10000,
+  maxPayloadSize:    50 * 1024 * 1024, // 50 MB
+
+  hooks: {
+    onBeforeEmit: ({ event }) => {
+      // After a new deployment, suppress noisy log events
+      if (event === 'log') return false;
+    },
+  },
+});
+```
+
+### getOptions()
+
+Inspect the current client configuration. Returns a frozen object.
+
+```javascript
+const opts = client.getOptions();
+console.log(opts);
+// {
+//   reconnection: true,
+//   reconnectionAttempts: 10,
+//   reconnectionDelay: 1000,
+//   maxReconnectionDelay: 30000,
+//   heartbeatInterval: 15000,
+//   ackTimeout: 10000,
+//   mode: 'ws',
+//   maxPayloadSize: 52428800,
+//   messageQueueSize: 100,
+//   compression: false,
+//   hasCustomReconnectDelay: false,
+//   hooks: ['onBeforeEmit'],
+// }
+```
+
+---
+
+## Full Example
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('wss://app.example.com', {
+  // Reconnection
+  reconnection:         true,
+  reconnectionAttempts: 20,
+  reconnectionDelay:    1000,
+  maxReconnectionDelay: 30000,
+
+  // Heartbeat
+  heartbeatInterval: 20000,
+
+  // ACK timeout
+  ackTimeout: 8000,
+
+  // Message queue: hold up to 200 messages while disconnected
+  messageQueueSize: 200,
+
+  // Security
+  tls:                 true,
+  rejectUnauthorized:  true,
+  headers: {
+    'Authorization': `Bearer ${getAuthToken()}`,
+  },
+
+  // Custom reconnect: linear back-off capped at 10s
+  customReconnectDelay: (attempt, base) => Math.min(base * attempt, 10000),
+
+  // Logging
+  logger: 'warn',
+
+  // Hooks
+  hooks: {
+    onBeforeEmit: ({ event, data }) => {
+      console.debug(`→ ${event}`, data);
+    },
+
+    onMessage: ({ event, data, isBinary }) => {
+      metrics.increment('client.messages.received');
+      if (isBinary) metrics.increment('client.binary.received');
+    },
+
+    onStateChange: ({ from, to }) => {
+      console.log(`Connection state: ${from} → ${to}`);
+      document.getElementById('status').textContent = to;
+    },
+
+    onMessageQueued: ({ event, queueSize }) => {
+      console.warn(`Queued "${event}" — queue size: ${queueSize}`);
+    },
+
+    onQueueDrained: ({ count }) => {
+      console.log(`Sent ${count} queued message(s) after reconnect`);
+    },
+
+    onError: ({ error, context }) => {
+      console.error(`[${context}]`, error.message);
+      errorTracker.capture(error);
+    },
+  },
+});
+
+// Events
+client.on('connect',         () => console.log('Connected!'));
+client.on('disconnect',      () => console.log('Disconnected'));
+client.on('reconnecting',    (attempt) => console.log('Reconnecting, attempt', attempt));
+client.on('reconnect_failed',() => console.error('Gave up reconnecting'));
+client.on('welcome',         (data) => console.log('Welcome:', data));
+
+client.connect();
+
+// Send a message
+client.emit('chat', { text: 'Hello!' });
+
+// Request-response
+const user = await client.request('getUser', { id: 42 }, 'getUser');
+console.log(user);
+
+// Binary data
+const buffer = await readFile('photo.png');
+client.emitBinary('upload', buffer);
+
+// Rooms
+client.joinRoom('general');
+client.joinRoom('project-alpha');
+```

@@ -1,47 +1,201 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with stelar-time-real"
+sidebarTitle: "Quickstart"
+description: "Install stelar-time-real and run a working real-time server and client in under five minutes using WebSocket or the binary TCP protocol."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+By the end of this guide you will have a running `StelarServer` that accepts WebSocket connections and a `StelarClient` that connects, sends a message, and receives a broadcast back — all with zero external dependencies.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+## Installation
 
-## Prerequisites
+<CodeGroup>
+```bash npm
+npm install stelar-time-real
+```
+```bash yarn
+yarn add stelar-time-real
+```
+```bash pnpm
+pnpm add stelar-time-real
+```
+</CodeGroup>
 
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Basic Setup
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Create a basic server">
+    Create a file called `server.js`. Import `StelarServer`, register a connection handler and an event handler, then call `start()`.
 
-    ```bash
-    npm install your-package
+    ```javascript
+    import { StelarServer } from 'stelar-time-real';
+
+    const stelar = new StelarServer({ port: 3000 });
+
+    stelar.onConnection((client) => {
+      console.log('Connected:', client.id);
+      client.emit('welcome', { message: 'Welcome to the server!' });
+    });
+
+    stelar.on('chat', (ctx) => {
+      ctx.broadcast('chat', ctx.data, ctx.id);
+    });
+
+    await stelar.start();
+    console.log('Server ready on port', stelar.getPort());
+    ```
+
+    `start()` returns a `Promise<number>` that resolves to the port the server is listening on. The server automatically handles WebSocket upgrades on the same HTTP port.
+  </Step>
+
+  <Step title="Create a client">
+    Create a file called `client.js`. Import `StelarClient`, listen for events, connect, and emit.
+
+    ```javascript
+    import { StelarClient } from 'stelar-time-real';
+
+    const client = new StelarClient('localhost:3000');
+
+    client.on('connect', () => console.log('Connected!'));
+    client.on('disconnect', () => console.log('Disconnected'));
+    client.on('welcome', (data) => console.log('Welcome:', data));
+    client.on('chat', (data) => console.log('Chat received:', data));
+
+    client.connect();
+
+    // Wait briefly then send a message
+    setTimeout(() => {
+      client.emit('chat', { message: 'Hello everyone!' });
+    }, 500);
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Run both and see output">
+    Open two terminals:
 
     ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+    # Terminal 1
+    node server.js
+    # → Server ready on port 3000
 
-    ```bash
-    your-cli start
+    # Terminal 2
+    node client.js
+    # → Connected!
+    # → Welcome: { message: 'Welcome to the server!' }
+    # → Chat received: { message: 'Hello everyone!' }
     ```
+
+    The client connects over WebSocket, the server fires `onConnection`, emits `welcome`, and then echoes the `chat` event back to all connected clients (excluding the sender).
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Production Server Configuration
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+For real deployments, pass the full options object to `StelarServer`:
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({
+  port: 3000,
+  tcpPort: 3001,                           // Enable binary TCP on a separate port
+  maxConnections: 10000,                   // Global connection cap
+  maxConnectionsPerIP: 50,                 // Per-IP connection limit
+  maxRooms: 10000,
+  maxRoomsPerClient: 50,
+  maxPayloadSize: 10 * 1024 * 1024,        // 10 MB max message size
+  rateLimit: { maxPoints: 100, windowMs: 1000 },
+  healthEndpoint: '/health',               // Kubernetes / Docker health probe
+  heartbeatInterval: 30000,
+  heartbeatTimeout: 60000,
+  gracefulShutdown: true,                  // Handle SIGINT / SIGTERM
+  shutdownTimeout: 10000,
+  allowedOrigins: ['https://mydomain.com'],
+  logger: 'info',
+});
+
+// Authentication middleware
+stelar.use((ctx, next) => {
+  const token = ctx.req?.headers?.authorization;
+  if (!token) return ctx.ack('error', { message: 'Token required' });
+  next();
+});
+
+stelar.onConnection((client) => {
+  console.log(`[${client.protocol}] Connected: ${client.id} from ${client.remoteAddress}`);
+  client.setMetadata('role', 'user');
+  client.emit('welcome', { id: client.id });
+});
+
+stelar.onDisconnect((client) => {
+  console.log('Disconnected:', client.id);
+});
+
+stelar.on('chat', (ctx) => {
+  ctx.broadcast('chat', ctx.data, ctx.id);
+});
+
+stelar.onAck('getUser', (ctx) => {
+  return { id: ctx.data.id, name: 'John', role: ctx.getMetadata('role') };
+});
+
+await stelar.start();
+```
+
+## Client with Reconnection and ACK Options
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('localhost:3000', {
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  maxReconnectionDelay: 30000,
+  ackTimeout: 5000,
+  messageQueueSize: 100,         // Queue messages while disconnected
+});
+
+client.on('connect', () => console.log('Connected!'));
+client.on('disconnect', () => console.log('Disconnected'));
+client.on('reconnecting', (attempt) => console.log('Reconnecting, attempt:', attempt));
+client.on('welcome', (data) => console.log('Welcome:', data));
+
+client.connect();
+
+// Request-response with Promise
+const user = await client.request('getUser', { id: 1 }, 'getUser');
+console.log(user); // { id: 1, name: 'John', role: 'user' }
+
+// Join rooms
+client.joinRoom('general');
+client.joinRoom('random');
+```
+
+## TypeScript Usage
+
+stelar-time-real ships with bundled type declarations — no `@types/*` package needed:
+
+```javascript
+import { StelarServer, StelarClient, StelarStats } from 'stelar-time-real';
+
+const server: StelarServer = new StelarServer({ port: 3000 });
+const stats: StelarStats = server.getStats();
+
+const client: StelarClient = new StelarClient('localhost:3000');
+```
+
+<Tip>
+  Use `mode: 'tcp'` on the client for server-to-server communication. The binary TCP protocol has a 7-byte header (versus up to 14 bytes for WebSocket framing), making it ideal for high-throughput microservice messaging.
+
+  ```javascript
+  const client = new StelarClient('localhost:3001', {
+    mode: 'tcp',
+    reconnection: true,
+  });
+
+  client.on('connect', () => console.log('TCP connected!'));
+  client.connect();
+  ```
+
+  TCP clients and WebSocket clients can coexist in the same rooms and receive the same broadcasts — the server handles the protocol difference transparently.
 </Tip>

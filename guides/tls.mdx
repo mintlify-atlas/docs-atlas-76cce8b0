@@ -1,0 +1,66 @@
+---
+title: "Secure Connections with TLS/SSL in stelar-time-real"
+sidebarTitle: "TLS / SSL"
+description: "Enable TLS for wss:// WebSocket and TCP TLS using Node.js native tls module — pass key and cert to StelarServer and set tls: true on the client."
+---
+
+stelar-time-real supports TLS for both of its protocols — WebSocket connections become `wss://` and TCP connections are wrapped with Node.js's native `tls` module. No external packages are required; the implementation uses only the built-in `tls` module that ships with Node.js. Enabling TLS on the server automatically applies to both the WebSocket upgrade and the TCP listener, so all traffic is encrypted with a single configuration change.
+
+## Server TLS configuration
+
+Pass a `tls` object containing the `key` and `cert` (as `Buffer` values) to the `StelarServer` constructor. Use `readFileSync` from the `fs` module to load your certificate files:
+
+```javascript
+import { readFileSync } from 'fs';
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({
+  port: 3000,       // wss:// WebSocket listens here
+  tcpPort: 3001,    // TCP + TLS listens here
+  tls: {
+    key:  readFileSync('server-key.pem'),
+    cert: readFileSync('server-cert.pem'),
+  },
+});
+
+await stelar.start();
+```
+
+Both `port` (WebSocket) and `tcpPort` (TCP) automatically use TLS when the `tls` option is present — there is no separate flag per protocol.
+
+## Client: secure WebSocket (wss://)
+
+Pass the full `wss://` URL and set `tls: true` in the client options:
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('wss://secure.mydomain.com', {
+  tls: true,
+  rejectUnauthorized: true,
+});
+
+client.connect();
+```
+
+## Client: TCP + TLS
+
+For TCP mode, set `mode: 'tcp'` alongside `tls: true`:
+
+```javascript
+const client = new StelarClient('secure.mydomain.com:3001', {
+  mode: 'tcp',
+  tls: true,
+  rejectUnauthorized: true,
+});
+
+client.connect();
+```
+
+<Note>
+  `rejectUnauthorized: true` is the default and tells Node.js to validate the server's certificate against the system's CA store. Set it to `false` only when connecting to a server with a **self-signed certificate in a development environment** — this disables certificate validation entirely.
+</Note>
+
+<Warning>
+  Never set `rejectUnauthorized: false` in production. Disabling certificate validation makes the connection vulnerable to man-in-the-middle attacks even when TLS is otherwise enabled. Always use a certificate signed by a trusted CA in production environments.
+</Warning>

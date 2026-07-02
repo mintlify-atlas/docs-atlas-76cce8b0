@@ -1,0 +1,492 @@
+---
+title: "TypeScript Interfaces and Types Reference"
+sidebarTitle: "Interfaces"
+description: "All exported TypeScript interfaces — StelarOptions, StelarStats, StelarClientInfo, IRateLimiter, IIPTracker, StelarHooks, EventRateLimits."
+---
+
+stelar-time-real is written entirely in TypeScript and ships bundled `.d.ts` declaration files. No separate `@types` package is needed — types are available immediately after install.
+
+```typescript
+import {
+  StelarServer,
+  StelarClient,
+  StelarStats,
+  IRateLimiter,
+  IIPTracker,
+} from 'stelar-time-real';
+```
+
+---
+
+## `IRateLimiter`
+
+Interface for a pluggable rate limiter. Implement this to swap the built-in token bucket with Redis, a database, or any other backing store. Pass your instance as `customRateLimiter` in `StelarOptions`.
+
+```typescript
+export interface IRateLimiter {
+  check(id: string, cost?: number): boolean;
+  reset(id: string): void;
+  cleanup(): void;
+  size(): number;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `check(id, cost?)` | Returns `true` if the client with the given `id` is allowed to proceed. `cost` defaults to `1`. Increment the client's counter inside this call. |
+| `reset(id)` | Remove all rate limit state for the given client ID. Called automatically on disconnect. |
+| `cleanup()` | Purge expired entries. Called on a 30-second internal interval. |
+| `size()` | Return the number of currently tracked entries. Surfaced in `StelarStats.rateLimiterEntries`. |
+
+```typescript
+import { StelarServer, IRateLimiter } from 'stelar-time-real';
+
+class RedisRateLimiter implements IRateLimiter {
+  constructor(private redis: RedisClient) {}
+
+  async check(id: string, cost = 1): Promise<boolean> {
+    const key = `ratelimit:${id}`;
+    const count = await this.redis.incr(key);
+    if (count === 1) await this.redis.expire(key, 1);
+    return count <= 100;
+  }
+
+  async reset(id: string) { await this.redis.del(`ratelimit:${id}`); }
+  async cleanup() { /* Redis TTLs handle expiry */ }
+  async size() { return 0; }
+}
+
+const server = new StelarServer({
+  port: 3000,
+  customRateLimiter: new RedisRateLimiter(redisClient),
+});
+```
+
+---
+
+## `IIPTracker`
+
+Interface for a pluggable per-IP connection tracker. Implement this to apply custom IP blocking logic, VIP whitelists, or distributed counters. Pass your instance as `customIPTracker` in `StelarOptions`.
+
+```typescript
+export interface IIPTracker {
+  check(ip: string): boolean;
+  add(ip: string): void;
+  remove(ip: string): void;
+  getCount(ip: string): number;
+  cleanup(): void;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `check(ip)` | Returns `true` if a new connection from this IP address should be allowed. |
+| `add(ip)` | Called when a new client from this IP successfully connects. Increment the count. |
+| `remove(ip)` | Called when a client from this IP disconnects. Decrement the count. |
+| `getCount(ip)` | Returns the current active connection count for the given IP. |
+| `cleanup()` | Purge stale zero-count entries. Called on a 30-second interval. |
+
+```typescript
+import { StelarServer, IIPTracker } from 'stelar-time-real';
+
+class CustomIPTracker implements IIPTracker {
+  private blocked = new Set(['1.2.3.4', '5.6.7.8']);
+  private vip = new Set(['10.0.0.1']);
+  private counts = new Map<string, number>();
+
+  check(ip: string): boolean {
+    if (this.blocked.has(ip)) return false;
+    if (this.vip.has(ip)) return true;
+    return (this.counts.get(ip) ?? 0) < 20;
+  }
+
+  add(ip: string) { this.counts.set(ip, (this.counts.get(ip) ?? 0) + 1); }
+  remove(ip: string) {
+    const n = (this.counts.get(ip) ?? 1) - 1;
+    n <= 0 ? this.counts.delete(ip) : this.counts.set(ip, n);
+  }
+  getCount(ip: string) { return this.counts.get(ip) ?? 0; }
+  cleanup() { for (const [ip, n] of this.counts) if (n <= 0) this.counts.delete(ip); }
+}
+```
+
+---
+
+## `StelarHooks`
+
+All hooks are optional. Return `false` from a hook to **cancel** the default server action (where documented). Hooks that accept a return value of `boolean | void` support cancellation; hooks typed as `=> void` are fire-and-forget.
+
+```typescript
+export interface StelarHooks {
+  onRateLimitExceeded?: (i: {
+    clientId: string;
+    event?: string;
+    protocol: 'ws' | 'tcp';
+  }) => boolean | void;
+
+  onMaxConnectionsReached?: (i: {
+    activeConnections: number;
+    max: number;
+    ip: string;
+  }) => void;
+
+  onMaxRoomsReached?: (i: {
+    clientId: string;
+    room: string;
+    totalRooms: number;
+    max: number;
+  }) => boolean | void;
+
+  onMaxRoomsPerClientReached?: (i: {
+    clientId: string;
+    room: string;
+    currentRooms: number;
+    max: number;
+  }) => boolean | void;
+
+  onPayloadTooLarge?: (i: {
+    clientId: string;
+    event?: string;
+    size: number;
+    max: number;
+  }) => void;
+
+  onInvalidMessage?: (i: {
+    clientId: string;
+    reason: string;
+    protocol: 'ws' | 'tcp';
+  }) => void;
+
+  onClientJoinRoom?: (i: {
+    clientId: string;
+    room: string;
+    metadata: Map<string, unknown>;
+  }) => boolean | void;
+
+  onClientLeaveRoom?: (i: {
+    clientId: string;
+    room: string;
+  }) => boolean | void;
+
+  onBeforeBroadcast?: (i: {
+    event: string;
+    data: unknown;
+    excludeId?: string;
+  }) => boolean | void;
+
+  onClientConnect?: (i: {
+    clientId: string;
+    ip: string;
+    protocol: 'ws' | 'tcp';
+    metadata: Map<string, unknown>;
+  }) => void;
+
+  onClientDisconnect?: (i: {
+    clientId: string;
+    ip: string;
+    protocol: 'ws' | 'tcp';
+    rooms: Set<string>;
+  }) => void;
+}
+```
+
+| Hook | Cancellable | Description |
+|------|-------------|-------------|
+| `onRateLimitExceeded` | ✅ return `false` | Fires when a client exceeds the rate limit. Return `false` to log without disconnecting. |
+| `onMaxConnectionsReached` | — | Fires when the global `maxConnections` cap is hit. |
+| `onMaxRoomsReached` | ✅ return `false` | Fires when the global `maxRooms` cap is hit. |
+| `onMaxRoomsPerClientReached` | ✅ return `false` | Fires when a client exceeds `maxRoomsPerClient`. |
+| `onPayloadTooLarge` | — | Fires when an inbound message exceeds `maxPayloadSize`. |
+| `onInvalidMessage` | — | Fires when a message fails JSON parsing or binary frame validation. |
+| `onClientJoinRoom` | ✅ return `false` | Fires before a client joins a room. Return `false` to reject the join. |
+| `onClientLeaveRoom` | ✅ return `false` | Fires before a client leaves a room. Return `false` to block the leave. |
+| `onBeforeBroadcast` | ✅ return `false` | Fires before any `.broadcast()` call. Return `false` to cancel it. |
+| `onClientConnect` | — | Fires after a client is registered, before `.onConnection()`. |
+| `onClientDisconnect` | — | Fires immediately after a client disconnects, before room cleanup completes. |
+
+```typescript
+const server = new StelarServer({
+  port: 3000,
+  hooks: {
+    onClientJoinRoom: ({ clientId, room, metadata }) => {
+      const role = metadata.get('role');
+      if (room.startsWith('admin-') && role !== 'admin') return false;
+    },
+    onBeforeBroadcast: ({ event }) => {
+      if (event === 'blocked-topic') return false;
+    },
+    onClientConnect: ({ clientId, ip, protocol }) => {
+      console.log(`[${protocol}] ${clientId} from ${ip}`);
+    },
+  },
+});
+```
+
+---
+
+## `EventRateLimits`
+
+A plain record mapping event names to per-event rate limit configurations. Passed as `eventRateLimits` in `StelarOptions` or applied at runtime with `server.setEventRateLimit()`.
+
+```typescript
+export type EventRateLimits = Record<string, {
+  maxPoints: number;
+  windowMs: number;
+}>;
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `maxPoints` | `number` | Maximum messages allowed per client per window. |
+| `windowMs` | `number` | Duration of the sliding window in milliseconds. |
+
+```typescript
+const server = new StelarServer({
+  port: 3000,
+  rateLimit: { maxPoints: 100, windowMs: 1000 }, // global: 100 msg/s
+  eventRateLimits: {
+    'chat':        { maxPoints: 5,  windowMs: 1000  }, // 5 msg/s
+    'file-upload': { maxPoints: 2,  windowMs: 10000 }, // 2 per 10s
+    'typing':      { maxPoints: 10, windowMs: 1000  }, // 10 msg/s
+    'location':    { maxPoints: 1,  windowMs: 5000  }, // 1 per 5s
+  },
+});
+```
+
+---
+
+## `StelarOptions`
+
+Constructor options for `new StelarServer(options)`. All fields are optional.
+
+```typescript
+export interface StelarOptions {
+  // Connection
+  port?: number;                  // Default: 3000
+  server?: HttpServer;            // Attach to an existing HTTP server
+  namespace?: string;             // WebSocket path namespace. Default: '/'
+  tcpPort?: number | false;       // TCP port (false = disabled). Default: false
+
+  // Limits
+  maxConnections?: number;        // Default: 10000
+  maxConnectionsPerIP?: number;   // Default: 50
+  maxRooms?: number;              // Default: 10000
+  maxRoomsPerClient?: number;     // Default: 50
+  maxPayloadSize?: number;        // Bytes. Default: 10 * 1024 * 1024 (10MB)
+  maxFrameSize?: number;          // Bytes. Default: library constant
+
+  // Rate Limiting
+  rateLimit?: {
+    maxPoints?: number;           // Default: 100
+    windowMs?: number;            // Default: 1000 (ms)
+  } | false;                      // false = disable rate limiting
+  eventRateLimits?: EventRateLimits;
+  customRateLimiter?: IRateLimiter;
+
+  // Timeouts
+  heartbeatInterval?: number;     // Ping interval ms. Default: 30000
+  heartbeatTimeout?: number;      // Disconnect after ms without pong. Default: 60000
+  connectTimeout?: number;        // Initial handshake timeout ms. Default: 10000
+
+  // Production / Operations
+  gracefulShutdown?: boolean;     // Capture SIGINT/SIGTERM. Default: true
+  shutdownTimeout?: number;       // Max drain wait ms. Default: 10000
+  healthEndpoint?: string | false; // Default: '/health'
+  customHealthHandler?: (req: IncomingMessage, res: ServerResponse, stats: StelarStats) => void;
+
+  // Security
+  allowedOrigins?: string[];      // WebSocket Origin whitelist
+  tls?: TlsOptions;               // Node.js TLS options for wss:// + TCP TLS
+
+  // Logging
+  logger?: Logger | LogLevel | false; // Level: 'debug'|'info'|'warn'|'error'|'silent'
+
+  // Extensibility
+  customIPTracker?: IIPTracker;
+  generateClientId?: () => string;
+  hooks?: StelarHooks;
+  compression?: boolean;          // Per-message WebSocket compression. Default: false
+}
+```
+
+See the [StelarServer reference](/api/stelar-server) for how these options affect server behaviour.
+
+---
+
+## `StelarClientInfo`
+
+Describes a connected client. Available as `ctx.clientInfo` inside every handler and returned by `server.getClients()`.
+
+```typescript
+export interface StelarClientInfo {
+  id: string;
+  rooms: Set<string>;
+  lastPing: number;
+  protocol: 'ws' | 'tcp';
+  connectedAt: number;
+  metadata: Map<string, unknown>;
+  messagesReceived: number;
+  messagesSent: number;
+  remoteAddress: string;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Unique client identifier (UUID v4 by default). |
+| `rooms` | `Set<string>` | Live set of room names this client currently belongs to. |
+| `lastPing` | `number` | Unix timestamp (ms) of the last successful PING/PONG exchange. |
+| `protocol` | `'ws' \| 'tcp'` | Transport protocol used by this client. |
+| `connectedAt` | `number` | Unix timestamp (ms) of when the client connected. |
+| `metadata` | `Map<string, unknown>` | Application-defined key-value store. Set via `ctx.setMetadata()`. |
+| `messagesReceived` | `number` | Total messages received from this client. |
+| `messagesSent` | `number` | Total messages sent to this client. |
+| `remoteAddress` | `string` | Client's IP address. Resolves `X-Forwarded-For` for WebSocket clients. |
+
+---
+
+## `StelarContext`
+
+Passed to every event handler. See the [StelarContext reference](/api/stelar-context) for full documentation of all methods and properties.
+
+```typescript
+export interface StelarContext {
+  // Identity & payload
+  id: string;
+  socket: NetSocket;
+  req: IncomingMessage | null;
+  data?: unknown;
+  buffer?: Uint8Array;
+  isBinary?: boolean;
+  event?: string;
+  error?: Error;
+  _correlationId?: string;
+  clientInfo: StelarClientInfo;
+
+  // Send methods
+  emit: (event: string, data: unknown) => void;
+  send: (respId: string, data: unknown) => void;
+  emitBinary: (event: string, buffer: ArrayBuffer) => void;
+  broadcast: (event: string, data: unknown) => void;
+  broadcastBinary: (event: string, buffer: ArrayBuffer) => void;
+  to: (room: string, event: string, data: unknown) => void;
+  toId: (id: string, event: string, data: unknown) => void;
+
+  // Room methods
+  getClients: (room?: string) => { id: string; rooms: string[] }[];
+  joinRoom: (room: string) => void;
+  leaveRoom: (room: string) => void;
+
+  // Metadata
+  setMetadata: (key: string, value: unknown) => void;
+  getMetadata: (key: string) => unknown;
+
+  // ACK
+  ack: (ackName: string, data: unknown) => void;
+}
+```
+
+---
+
+## `StelarStats`
+
+Return type of `server.getStats()`. Contains a complete live snapshot of server health.
+
+```typescript
+export interface StelarStats {
+  totalConnections: number;
+  activeConnections: number;
+  totalMessagesReceived: number;
+  totalMessagesSent: number;
+  totalRooms: number;
+  uptime: number;
+  wsConnections: number;
+  tcpConnections: number;
+  memoryUsage: NodeJS.MemoryUsage;
+  rateLimiterEntries: number;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `totalConnections` | `number` | Cumulative count of every client that has connected since server start. |
+| `activeConnections` | `number` | Clients currently connected. |
+| `totalMessagesReceived` | `number` | All inbound messages processed since server start. |
+| `totalMessagesSent` | `number` | All outbound messages dispatched since server start. |
+| `totalRooms` | `number` | Number of rooms currently active. |
+| `uptime` | `number` | Milliseconds since the server started. |
+| `wsConnections` | `number` | Active WebSocket connections. |
+| `tcpConnections` | `number` | Active TCP connections. |
+| `memoryUsage` | `NodeJS.MemoryUsage` | Raw `process.memoryUsage()` object. |
+| `rateLimiterEntries` | `number` | Number of clients currently tracked in the rate limiter. |
+
+<Tip>
+  `StelarStats` is ideal for plugging into monitoring dashboards. Poll `server.getStats()` on an interval and push the result to Prometheus, Datadog, or any time-series store. The built-in `/health` endpoint serves the same data as JSON and is ready for Kubernetes liveness/readiness probes out of the box.
+</Tip>
+
+---
+
+## `StelarMiddleware`
+
+Type for functions passed to `server.use()`. The middleware chain runs in registration order on every new connection. Call `next()` to proceed to the next middleware or to `.onConnection()`.
+
+```typescript
+export interface StelarMiddleware {
+  (ctx: StelarContext, next: () => void): void;
+}
+```
+
+```typescript
+import { StelarMiddleware } from 'stelar-time-real';
+
+const authMiddleware: StelarMiddleware = (ctx, next) => {
+  const token = ctx.req?.headers?.authorization;
+  if (!token) return ctx.socket.destroy();
+  ctx.setMetadata('userId', verifyToken(token));
+  next();
+};
+
+server.use(authMiddleware);
+```
+
+---
+
+## `StelarEventHandler`
+
+Type for functions passed to `.on()`, `.onConnection()`, `.onDisconnect()`, and `.onAck()`.
+
+```typescript
+export type StelarEventHandler = (ctx: StelarContext) => void;
+```
+
+```typescript
+import { StelarEventHandler } from 'stelar-time-real';
+
+const handleChat: StelarEventHandler = (ctx) => {
+  ctx.broadcast('chat', { from: ctx.id, text: ctx.data.text });
+};
+
+server.on('chat', handleChat);
+```
+
+---
+
+## `StelarWildcardHandler`
+
+Type for the handler passed to `.onAll()`. Receives a wrapper object containing the event name and the full `StelarContext` as `data`.
+
+```typescript
+export type StelarWildcardHandler = (
+  payload: { event: string; data: StelarContext }
+) => void;
+```
+
+```typescript
+import { StelarWildcardHandler } from 'stelar-time-real';
+
+const logger: StelarWildcardHandler = ({ event, data: ctx }) => {
+  console.log(`[${ctx.id}] event="${event}"`);
+};
+
+server.onAll(logger);
+```

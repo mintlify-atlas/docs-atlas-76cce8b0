@@ -1,0 +1,108 @@
+---
+title: "Group Clients into Rooms for Targeted Broadcasts"
+sidebarTitle: "Rooms"
+description: "Rooms are named channels that group clients for targeted broadcasts. A client can join multiple rooms simultaneously, and rooms are cleaned up automatically."
+---
+
+Rooms are named communication channels that let you send messages to a subset of connected clients instead of broadcasting to everyone. A single client can be a member of multiple rooms at the same time — for example, a chat user might be in `general`, `project-alpha`, and a private direct-message room simultaneously. When the last member leaves a room or disconnects, stelar-time-real automatically removes the room from memory with no manual cleanup required.
+
+## Server-side room operations
+
+### Joining and leaving
+
+Inside any event handler or middleware, use the context methods to move a client in and out of rooms:
+
+| Method | Description |
+|---|---|
+| `ctx.joinRoom(room)` | Add this client to the named room |
+| `ctx.leaveRoom(room)` | Remove this client from the named room |
+
+### Sending to a room
+
+```javascript
+// From inside a handler — excludes the sending client by default
+ctx.to('room-name', 'eventName', data);
+
+// From outside a handler — broadcast to the full room
+stelar.to('room-name', 'eventName', data);
+
+// Exclude a specific client ID
+stelar.to('room-name', 'eventName', data, excludeId);
+```
+
+### Inspecting rooms
+
+```javascript
+stelar.getRoomMembers('room-name'); // Returns an array of client IDs
+stelar.getRooms();                  // Returns an array of all active room names
+```
+
+## Example: joining a channel and notifying members
+
+```javascript
+// Server
+stelar.on('joinChannel', (ctx) => {
+  ctx.joinRoom(ctx.data.channel);
+  ctx.to(ctx.data.channel, 'userJoined', { userId: ctx.id });
+});
+```
+
+When a client emits `joinChannel` with `{ channel: 'general' }`, the server adds them to `general` and broadcasts a `userJoined` event to everyone already in that room.
+
+## Example: broadcasting a message to all of a client's rooms
+
+```javascript
+stelar.on('channelMessage', (ctx) => {
+  const rooms = ctx.clientInfo.rooms;
+  for (const room of rooms) {
+    ctx.to(room, 'channelMessage', ctx.data, ctx.id);
+  }
+});
+```
+
+`ctx.clientInfo.rooms` is a `Set<string>` of all room names the client is currently a member of. Iterating it lets you fan a single event out to every room the sender belongs to.
+
+## Client-side room operations
+
+```javascript
+client.joinRoom('general');
+client.joinRoom('random');
+client.joinRoom('project-alpha');
+
+client.leaveRoom('random');
+```
+
+Calling `joinRoom` on the client sends a join frame to the server, which processes it and adds the client to the room. The server emits a `joined-room` event back to the client confirming the join.
+
+## Limiting room membership
+
+Control how many rooms can exist globally and per client through the server options:
+
+```javascript
+const stelar = new StelarServer({
+  maxRooms: 10000,         // Global maximum number of rooms
+  maxRoomsPerClient: 50,   // Maximum rooms a single client can join
+});
+```
+
+When a limit is reached, the join is silently rejected. You can observe this via the hook system.
+
+<Tip>
+  Use the `onClientJoinRoom` and `onClientLeaveRoom` hooks to apply fine-grained access control. Return `false` from either hook to reject the operation entirely — for example, to restrict admin rooms to clients with the `admin` role stored in metadata:
+
+  ```javascript
+  const stelar = new StelarServer({
+    hooks: {
+      onClientJoinRoom: ({ clientId, room, metadata }) => {
+        if (room.startsWith('admin-') && metadata.get('role') !== 'admin') {
+          return false; // Reject: admins only
+        }
+      },
+    },
+  });
+  ```
+</Tip>
+
+<Note>
+  Rooms are cleaned up automatically when the last client leaves or disconnects. You never need to manually delete a room — stelar-time-real tracks membership internally and removes the room entry as soon as its member set is empty.
+</Note>

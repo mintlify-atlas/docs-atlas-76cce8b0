@@ -1,0 +1,111 @@
+---
+title: "Authenticate Connections with stelar-time-real Middleware"
+sidebarTitle: "Middleware"
+description: "Middleware runs before a client is accepted, letting you authenticate tokens, block IPs, and chain sequential checks — skipping next() rejects the connection."
+---
+
+Middleware in stelar-time-real sits between the raw connection event and your `onConnection` handler. Every incoming client passes through each registered middleware **in the order it was added** before being accepted onto the server. This gives you a single, predictable place to enforce authentication, logging, or any connection-level policy. If a middleware does not call `next()`, the pipeline stops and the connection is rejected — no `onConnection` handler fires, and no events are dispatched for that client.
+
+## Adding middleware
+
+Register middleware with `stelar.use()`. Each function receives a context (`ctx`) and a `next` callback:
+
+```javascript
+stelar.use((ctx, next) => {
+  // Inspect ctx, validate credentials, etc.
+  // Call next() to allow the connection to proceed.
+  // Don't call next() to reject it.
+  next();
+});
+```
+
+Multiple calls to `stelar.use()` chain the middlewares sequentially — they run in the order they were registered.
+
+## Step-by-step: token authentication
+
+<Steps>
+  <Step title="Check the Authorization header">
+    Read the token from `ctx.req?.headers?.authorization`. Because TCP clients do not perform an HTTP handshake, `ctx.req` will be `null` for them — use optional chaining to handle both protocols safely.
+
+    ```javascript
+    stelar.use((ctx, next) => {
+      const token = ctx.req?.headers?.authorization;
+      if (!token) {
+        return ctx.ack('error', { message: 'Token required' });
+      }
+      next();
+    });
+    ```
+
+    Calling `ctx.ack('error', ...)` sends an error frame back to the client before the connection is dropped because `next()` was never called.
+  </Step>
+
+  <Step title="Store metadata on the client">
+    Once the token is verified, attach any derived data (user ID, role, etc.) to the client context via `ctx.setMetadata()`. This data travels with the client for the lifetime of the connection and is readable from any event handler via `ctx.getMetadata()`.
+
+    ```javascript
+    stelar.use((ctx, next) => {
+      const token = ctx.req?.headers?.authorization;
+      if (!token) {
+        return ctx.ack('error', { message: 'Token required' });
+      }
+
+      // Validate the token and extract the user ID
+      const userId = getUserIdFromToken(token);
+      ctx.setMetadata('userId', userId);
+      ctx.setMetadata('role', 'user');
+
+      next();
+    });
+    ```
+  </Step>
+
+  <Step title="Call next() to proceed">
+    Always call `next()` at the end of a middleware that should allow the connection. Forgetting it silently drops the client even when validation passes.
+
+    ```javascript
+    stelar.use((ctx, next) => {
+      const token = ctx.req?.headers?.authorization;
+      if (!token) {
+        return ctx.ack('error', { message: 'Token required' });
+      }
+
+      ctx.setMetadata('userId', getUserIdFromToken(token));
+      next(); // ✅ Connection proceeds to onConnection
+    });
+    ```
+  </Step>
+</Steps>
+
+## Example: IP block middleware
+
+Use `ctx.socket.destroy()` to immediately terminate a connection from a blocked IP without sending any response frame:
+
+```javascript
+stelar.use((ctx, next) => {
+  const ip = ctx.req?.headers?.['x-forwarded-for'] || ctx.socket.remoteAddress;
+  if (isBlocked(ip)) {
+    return ctx.socket.destroy();
+  }
+  next();
+});
+```
+
+## Example: logging middleware
+
+Middleware is also useful for connection-level logging. Because it runs before `onConnection`, you capture every attempted connection — including ones that will be rejected by a later middleware:
+
+```javascript
+stelar.use((ctx, next) => {
+  console.log(`New connection from ${ctx.clientInfo.remoteAddress}`);
+  next();
+});
+```
+
+<Warning>
+  Always call `next()` unless you intentionally want to reject the connection. A middleware that returns without calling `next()` — even due to a bug or an unhandled promise — will silently drop every client that reaches it.
+</Warning>
+
+## TCP clients and ctx.req
+
+`ctx.req` is the Node.js `IncomingMessage` object for WebSocket clients (it comes from the HTTP upgrade request). For clients connecting in TCP mode, no HTTP request is involved, so `ctx.req` is always `null`. Use optional chaining (`ctx.req?.headers?.authorization`) when writing middleware that should work for both protocols.

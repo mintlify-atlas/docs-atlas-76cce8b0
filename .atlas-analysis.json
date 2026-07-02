@@ -1,0 +1,149 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "stelar-time-real",
+  "projectDescription": "A zero-dependency, production-ready real-time library for Node.js that implements its own WebSocket (RFC 6455) and custom binary TCP protocol from scratch using only built-in Node.js modules.",
+  "theme": "luma",
+  "primaryColor": "#7c7c7c",
+  "lightColor": "#111111",
+  "darkColor": "#cacaca",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/middleware",
+              "guides/rooms",
+              "guides/ack",
+              "guides/binary",
+              "guides/tls",
+              "guides/scaling"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/server-options",
+              "configuration/client-options",
+              "configuration/rate-limiting",
+              "configuration/hooks",
+              "configuration/extensibility"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Server",
+            "pages": [
+              "api/stelar-server",
+              "api/stelar-context",
+              "api/interfaces"
+            ]
+          },
+          {
+            "group": "Client",
+            "pages": [
+              "api/stelar-client",
+              "api/client-events"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Zero dependencies — uses only Node.js built-in modules (http, net, crypto, tls)",
+    "Dual-protocol: WebSocket (RFC 6455) and custom binary TCP on separate ports",
+    "Token-bucket rate limiting with per-client and per-event overrides",
+    "Room-based pub/sub with automatic cleanup",
+    "ACK (request-response) system built over the real-time protocol",
+    "Graceful shutdown with SIGINT/SIGTERM handling",
+    "Health check HTTP endpoint compatible with Kubernetes and Docker",
+    "TLS/SSL support for both wss:// and TCP",
+    "Extensible via custom rate limiter, IP tracker, and client ID generator interfaces",
+    "Runtime configuration updates without server restart",
+    "Client-side message queue with auto-drain on reconnect",
+    "Exponential backoff reconnection with configurable jitter",
+    "Full TypeScript support with bundled .d.ts definitions",
+    "O(1) client lookup by ID using indexed Map",
+    "Hook system for server and client lifecycle events"
+  ],
+  "publicApiSurface": [
+    "StelarServer",
+    "StelarClient",
+    "IRateLimiter",
+    "IIPTracker",
+    "StelarHooks",
+    "StelarOptions",
+    "StelarClientOptions",
+    "StelarContext",
+    "StelarStats",
+    "StelarClientInfo",
+    "StelarMiddleware",
+    "StelarEventHandler",
+    "EventRateLimits",
+    "StelarServer.on(event, handler)",
+    "StelarServer.onAll(handler)",
+    "StelarServer.onConnection(handler)",
+    "StelarServer.onDisconnect(handler)",
+    "StelarServer.onAck(name, handler)",
+    "StelarServer.use(middleware)",
+    "StelarServer.broadcast(event, data, excludeId?)",
+    "StelarServer.to(room, event, data, excludeId?)",
+    "StelarServer.toId(id, event, data)",
+    "StelarServer.broadcastBinary(event, buffer)",
+    "StelarServer.getClients(room?)",
+    "StelarServer.getRoomMembers(room)",
+    "StelarServer.getRooms()",
+    "StelarServer.getStats()",
+    "StelarServer.getPort()",
+    "StelarServer.start(callback?)",
+    "StelarServer.stop()",
+    "StelarServer.updateConfig(options)",
+    "StelarServer.getConfig()",
+    "StelarServer.setEventRateLimit(event, config)",
+    "StelarServer.removeEventRateLimit(event)",
+    "StelarServer.setClientRateLimit(clientId, config)",
+    "StelarServer.removeClientRateLimit(clientId)",
+    "StelarClient.connect(callback?)",
+    "StelarClient.disconnect()",
+    "StelarClient.emit(event, data, opts?)",
+    "StelarClient.emitBinary(event, data)",
+    "StelarClient.sendFile(file)",
+    "StelarClient.sendImage(blob)",
+    "StelarClient.request(event, data, ackName)",
+    "StelarClient.on(event, handler)",
+    "StelarClient.off(event, handler)",
+    "StelarClient.once(event, handler)",
+    "StelarClient.onAll(handler)",
+    "StelarClient.onAck(name, handler)",
+    "StelarClient.joinRoom(room)",
+    "StelarClient.leaveRoom(room)",
+    "StelarClient.isConnected()",
+    "StelarClient.getState()",
+    "StelarClient.getId()",
+    "StelarClient.getUrl()",
+    "StelarClient.setUrl(url)",
+    "StelarClient.getMessagesSent()",
+    "StelarClient.getMessagesReceived()",
+    "StelarClient.getLastError()",
+    "StelarClient.getConnectTime()",
+    "StelarClient.getQueueSize()",
+    "StelarClient.updateOptions(options)",
+    "StelarClient.getOptions()",
+    "StelarClient.removeAllListeners(event?)"
+  ]
+}

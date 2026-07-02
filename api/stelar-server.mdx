@@ -1,0 +1,515 @@
+---
+title: "StelarServer — Complete Method Reference"
+sidebarTitle: "StelarServer"
+description: "Full reference for all StelarServer methods — events, broadcasting, room management, lifecycle, metrics, and runtime config."
+---
+
+`StelarServer` is the main class of stelar-time-real. Instantiate it with an options object, call `.start()` to bind the server, and register event handlers to respond to clients. A single `StelarServer` instance handles both WebSocket (RFC 6455) and custom binary TCP connections simultaneously.
+
+```typescript
+import { StelarServer } from 'stelar-time-real';
+
+const server = new StelarServer({ port: 3000 });
+await server.start();
+```
+
+---
+
+## Event Listeners
+
+Register handlers that fire when clients connect, disconnect, or emit named events.
+
+### `.on(event, handler)`
+
+Listen for a specific client-emitted event. The handler receives a [`StelarContext`](/api/stelar-context) object.
+
+```typescript
+server.on(event: string, handler: StelarEventHandler): this
+```
+
+```javascript
+server.on('chat', (ctx) => {
+  ctx.broadcast('chat', ctx.data, ctx.id);
+});
+
+server.on('ping', (ctx) => {
+  ctx.emit('pong', { ts: Date.now() });
+});
+```
+
+---
+
+### `.onAll(handler)`
+
+Register a wildcard listener that fires for every event received from any client, regardless of name. Useful for logging, auditing, and fan-out bridges (e.g. Redis pub/sub).
+
+```typescript
+server.onAll(handler: StelarWildcardHandler): this
+// handler receives: { event: string; data: StelarContext }
+```
+
+```javascript
+server.onAll(({ event, data: ctx }) => {
+  console.log(`[${ctx.id}] event="${event}"`);
+});
+```
+
+---
+
+### `.onConnection(handler)`
+
+Fired once when a client successfully completes the connection handshake (WebSocket upgrade or TCP connect frame). The handler receives a `StelarContext` containing the full `clientInfo`.
+
+```typescript
+server.onConnection(handler: StelarEventHandler): this
+```
+
+```javascript
+server.onConnection((ctx) => {
+  console.log(`${ctx.clientInfo.protocol} client connected: ${ctx.id}`);
+  ctx.setMetadata('role', 'guest');
+  ctx.emit('welcome', { id: ctx.id });
+});
+```
+
+---
+
+### `.onDisconnect(handler)`
+
+Fired when a client disconnects (socket close, error, or graceful shutdown). All rooms the client belonged to are cleaned up before the handler runs.
+
+```typescript
+server.onDisconnect(handler: StelarEventHandler): this
+```
+
+```javascript
+server.onDisconnect((ctx) => {
+  console.log(`Client disconnected: ${ctx.id}`);
+});
+```
+
+---
+
+### `.onAck(name, handler)`
+
+Register a named ACK (request-response) handler. The value **returned** by the handler is serialized and sent back to the requesting client. Clients invoke this with `client.request(name, data, name)`.
+
+```typescript
+server.onAck(name: string, handler: StelarEventHandler): this
+// Return value from handler is sent back to the client
+```
+
+```javascript
+server.onAck('getUser', (ctx) => {
+  const userId = ctx.data.id;
+  return { id: userId, name: 'Alice', role: ctx.getMetadata('role') };
+});
+
+server.onAck('validateToken', (ctx) => {
+  if (!isValid(ctx.data.token)) throw new Error('Invalid token');
+  return { ok: true, userId: 42 };
+});
+```
+
+---
+
+## Broadcasting
+
+Send events to one client, a subset, or all connected clients.
+
+| Signature | Description |
+|-----------|-------------|
+| `.broadcast(event, data, excludeId?)` | Send to all connected clients. Pass `excludeId` to skip one (e.g. the sender). |
+| `.to(room, event, data, excludeId?)` | Send to all clients in a room. Optionally exclude one client by ID. |
+| `.toId(id, event, data)` | Send to a single client by ID. Uses an indexed `Map` — O(1) lookup. |
+| `.broadcastBinary(event, buffer)` | Broadcast raw binary data (`ArrayBuffer`) to all clients under the given event name. |
+
+```typescript
+server.broadcast(event: string, data: unknown, excludeId?: string): this
+server.to(room: string, event: string, data: unknown, excludeId?: string): this
+server.toId(id: string, event: string, data: unknown): this
+server.broadcastBinary(event: string, buf: ArrayBuffer): void
+```
+
+```javascript
+// Broadcast to everyone
+server.broadcast('announcement', { message: 'Server restarting in 60s' });
+
+// Broadcast to all except the sender
+server.on('chat', (ctx) => {
+  server.broadcast('chat', ctx.data, ctx.id);
+});
+
+// Send to a room, excluding the sender
+server.to('general', 'message', { text: 'Hello room' }, senderId);
+
+// Send to one specific client — O(1)
+server.toId(targetClientId, 'dm', { from: 'admin', text: 'Hello' });
+
+// Broadcast a binary file to all clients
+const buf = fs.readFileSync('audio.opus');
+server.broadcastBinary('audio-chunk', buf.buffer);
+```
+
+---
+
+## Room Management
+
+Rooms are lightweight channels. Clients can join multiple rooms simultaneously. Rooms are created automatically and destroyed when the last member leaves.
+
+### `.getClients(room?)`
+
+Returns a list of all connected clients. If `room` is provided, only clients in that room are returned.
+
+```typescript
+server.getClients(room?: string): { id: string; rooms: string[] }[]
+```
+
+```javascript
+const all = server.getClients();
+// [{ id: 'abc-123', rooms: ['general', 'news'] }, ...]
+
+const inGeneral = server.getClients('general');
+// [{ id: 'abc-123', rooms: ['general', 'news'] }]
+```
+
+---
+
+### `.getRoomMembers(room)`
+
+Returns an array of client ID strings currently in the given room.
+
+```typescript
+server.getRoomMembers(room: string): string[]
+```
+
+```javascript
+const members = server.getRoomMembers('lobby');
+// ['client-uuid-1', 'client-uuid-2']
+```
+
+---
+
+### `.getRooms()`
+
+Returns an array of all currently active room names.
+
+```typescript
+server.getRooms(): string[]
+```
+
+```javascript
+const rooms = server.getRooms();
+// ['general', 'lobby', 'vip-lounge']
+```
+
+---
+
+## Metrics & Info
+
+### `.getStats()`
+
+Returns a live snapshot of server statistics. No side-effects; safe to poll frequently.
+
+```typescript
+server.getStats(): StelarStats
+```
+
+<ResponseField name="totalConnections" type="number">
+  Cumulative count of every client that has ever connected since server start.
+</ResponseField>
+
+<ResponseField name="activeConnections" type="number">
+  Number of clients currently connected.
+</ResponseField>
+
+<ResponseField name="totalMessagesReceived" type="number">
+  Total inbound messages processed across all clients.
+</ResponseField>
+
+<ResponseField name="totalMessagesSent" type="number">
+  Total outbound messages dispatched across all clients.
+</ResponseField>
+
+<ResponseField name="totalRooms" type="number">
+  Number of rooms currently active.
+</ResponseField>
+
+<ResponseField name="uptime" type="number">
+  Milliseconds since the server was started.
+</ResponseField>
+
+<ResponseField name="wsConnections" type="number">
+  Active WebSocket connections.
+</ResponseField>
+
+<ResponseField name="tcpConnections" type="number">
+  Active TCP connections.
+</ResponseField>
+
+<ResponseField name="memoryUsage" type="NodeJS.MemoryUsage">
+  Raw object from `process.memoryUsage()` — includes `heapUsed`, `heapTotal`, `rss`, `external`.
+</ResponseField>
+
+<ResponseField name="rateLimiterEntries" type="number">
+  Current number of tracked entries in the active rate limiter.
+</ResponseField>
+
+```javascript
+const stats = server.getStats();
+console.log(stats);
+// {
+//   totalConnections: 150,
+//   activeConnections: 42,
+//   totalMessagesReceived: 5000,
+//   totalMessagesSent: 4800,
+//   totalRooms: 12,
+//   uptime: 3600000,
+//   wsConnections: 38,
+//   tcpConnections: 4,
+//   memoryUsage: { heapUsed: 11062016, heapTotal: 17301504, rss: 24576000, external: 1245184 },
+//   rateLimiterEntries: 42
+// }
+```
+
+---
+
+### `.getPort()`
+
+Returns the port the HTTP/WebSocket server is currently listening on. Reflects the actual bound port when auto-incrementing is used.
+
+```typescript
+server.getPort(): number
+```
+
+```javascript
+const port = server.getPort(); // e.g. 3000
+```
+
+---
+
+## Lifecycle
+
+### `.use(middleware)`
+
+Add a middleware function that runs for every new connection before `.onConnection()` is called. Call `next()` to proceed; omit it to reject the connection. Multiple middlewares execute in registration order.
+
+```typescript
+server.use(middleware: StelarMiddleware): this
+// type StelarMiddleware = (ctx: StelarContext, next: () => void) => void
+```
+
+```javascript
+// Authentication middleware
+server.use((ctx, next) => {
+  const token = ctx.req?.headers?.authorization;
+  if (!token) return ctx.socket.destroy();
+  ctx.setMetadata('userId', verifyToken(token));
+  next();
+});
+
+// Logging middleware
+server.use((ctx, next) => {
+  console.log(`New connection from ${ctx.clientInfo.remoteAddress}`);
+  next();
+});
+```
+
+---
+
+### `.start(callback?)`
+
+Starts the HTTP/WebSocket server (and the TCP server if `tcpPort` is set). Returns a `Promise<number>` that resolves with the bound port. The optional callback also receives the port. Calling `.start()` on an already-started server is a no-op.
+
+```typescript
+server.start(callback?: (port: number) => void): Promise<number>
+```
+
+```javascript
+// Promise style
+const port = await server.start();
+console.log(`Listening on port ${port}`);
+
+// Callback style
+server.start((port) => {
+  console.log(`Listening on port ${port}`);
+});
+```
+
+---
+
+### `.stop()`
+
+Immediately destroys all active sockets, clears all rooms, removes internal timers and signal handlers, and closes the HTTP and TCP servers. Use `.gracefulShutdown` in options or listen to `SIGTERM` via `.onShutdown()` for a graceful drain instead.
+
+```typescript
+server.stop(): this
+```
+
+```javascript
+await server.start();
+
+// Later — clean teardown
+server.stop();
+```
+
+---
+
+### `.onShutdown(callback)`
+
+Register a callback that fires when a graceful shutdown completes (after SIGINT or SIGTERM). `force` is `true` if the shutdown timed out and connections were forcefully destroyed.
+
+```typescript
+server.onShutdown(cb: (sig: string, force: boolean) => void): this
+```
+
+```javascript
+server.onShutdown((sig, force) => {
+  if (force) console.warn('Forced shutdown after timeout');
+  process.exit(force ? 1 : 0);
+});
+```
+
+---
+
+## Runtime Config
+
+Update server behaviour on the fly — no restart required.
+
+### `.updateConfig(options)`
+
+Applies a partial `StelarOptions` object to the running server. Affects new connections and future operations immediately.
+
+```typescript
+server.updateConfig(options: Partial<StelarOptions>): this
+```
+
+```javascript
+server.updateConfig({
+  maxConnections: 500,
+  maxRooms: 5000,
+  rateLimit: { maxPoints: 200, windowMs: 1000 },
+  allowedOrigins: ['https://app.com', 'https://admin.app.com'],
+});
+
+// Swap hooks at runtime
+server.updateConfig({
+  hooks: {
+    onRateLimitExceeded: ({ clientId }) => {
+      banUser(clientId);
+      return false; // don't disconnect, they're already banned
+    },
+  },
+});
+```
+
+---
+
+### `.getConfig()`
+
+Returns a frozen snapshot of the current effective server configuration. Useful for inspection and debugging.
+
+```typescript
+server.getConfig(): Readonly<{ ... }>
+```
+
+```javascript
+const config = server.getConfig();
+console.log(config);
+// {
+//   maxConnections: 500,
+//   maxConnectionsPerIP: 50,
+//   maxRooms: 5000,
+//   maxRoomsPerClient: 50,
+//   maxPayloadSize: 10485760,
+//   heartbeatInterval: 30000,
+//   heartbeatTimeout: 60000,
+//   connectTimeout: 10000,
+//   shutdownTimeout: 10000,
+//   compression: false,
+//   hasCustomRateLimiter: false,
+//   hasCustomIPTracker: false,
+//   hasCustomClientIdGenerator: false,
+//   hasCustomHealthHandler: false,
+//   eventRateLimits: ['chat', 'file-upload'],
+//   hooks: ['onRateLimitExceeded'],
+//   allowedOrigins: ['https://app.com']
+// }
+```
+
+---
+
+### `.setEventRateLimit(event, config)`
+
+Add or replace a per-event rate limit. Overrides the global rate limiter for that specific event name.
+
+```typescript
+server.setEventRateLimit(
+  event: string,
+  config: { maxPoints: number; windowMs: number }
+): this
+```
+
+```javascript
+// Max 5 chat messages per second per client
+server.setEventRateLimit('chat', { maxPoints: 5, windowMs: 1000 });
+
+// Max 2 file uploads per 10 seconds per client
+server.setEventRateLimit('file-upload', { maxPoints: 2, windowMs: 10000 });
+```
+
+---
+
+### `.removeEventRateLimit(event)`
+
+Remove the per-event rate limit for a given event name, reverting it to the global rate limiter.
+
+```typescript
+server.removeEventRateLimit(event: string): this
+```
+
+```javascript
+server.removeEventRateLimit('chat');
+```
+
+---
+
+### `.setClientRateLimit(clientId, config)`
+
+Override the rate limit for a specific connected client — useful for premium tiers or trusted bots.
+
+```typescript
+server.setClientRateLimit(
+  clientId: string,
+  config: { maxPoints: number; windowMs: number }
+): this
+```
+
+```javascript
+server.onConnection((ctx) => {
+  const role = ctx.getMetadata('role');
+
+  if (role === 'premium') {
+    server.setClientRateLimit(ctx.id, { maxPoints: 500, windowMs: 1000 });
+  } else if (role === 'bot') {
+    server.setClientRateLimit(ctx.id, { maxPoints: 1000, windowMs: 1000 });
+  }
+  // Regular users fall through to the global rate limiter
+});
+```
+
+Rate limiting priority order: **per-client override → event-specific → global → custom rate limiter**.
+
+---
+
+### `.removeClientRateLimit(clientId)`
+
+Remove the per-client rate limit override, reverting the client to the global rate limiter.
+
+```typescript
+server.removeClientRateLimit(clientId: string): this
+```
+
+```javascript
+server.removeClientRateLimit(ctx.id);
+```

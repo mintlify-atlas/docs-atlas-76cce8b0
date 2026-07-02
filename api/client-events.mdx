@@ -1,0 +1,228 @@
+---
+title: "StelarClient Built-In Events Reference"
+sidebarTitle: "Client Events"
+description: "Reference for all built-in StelarClient lifecycle events — connect, disconnect, reconnecting, reconnect_failed, and error."
+---
+
+`StelarClient` emits several built-in lifecycle events in addition to any server-defined application events. Register handlers for them exactly as you would for any other event — using `.on()`, `.once()`, or `.off()`. None of these event names are reserved at the protocol level, so you should not use them as custom application event names on your server.
+
+---
+
+## Built-In Events
+
+### `'connect'`
+
+Fires once the WebSocket or TCP handshake completes and the client transitions to the `'connected'` state. No arguments are passed to the handler.
+
+```javascript
+client.on('connect', () => {
+  console.log('Connected! Client ID:', client.getId());
+});
+```
+
+This is the correct place to perform any one-time setup after a successful connection: joining rooms, sending presence data, or draining an application-level queue.
+
+---
+
+### `'disconnect'`
+
+Fires when the connection is lost, whether initiated by the server, a network drop, or a local call to `.disconnect()`. For WebSocket connections the handler receives a `{ code, reason }` object matching the [WebSocket close frame](https://www.rfc-editor.org/rfc/rfc6455#section-5.5.1). For TCP connections the argument is `undefined`.
+
+```typescript
+client.on('disconnect', (info) => {
+  // info = { code: number, reason: string } for WebSocket
+  // info = undefined for TCP
+  if (info) {
+    console.warn(`Disconnected: code=${info.code} reason="${info.reason}"`);
+  } else {
+    console.warn('TCP connection closed');
+  }
+});
+```
+
+After `'disconnect'` fires, the client will automatically schedule a reconnection attempt if `reconnection: true` (the default).
+
+---
+
+### `'reconnecting'`
+
+Fires at the start of each reconnection attempt, **before** the delay timer elapses and the actual connect call is made. The handler receives the current attempt number as a `number` (1-indexed).
+
+```javascript
+client.on('reconnecting', (attempt) => {
+  console.log(`Reconnection attempt #${attempt} of ${client.getOptions().reconnectionAttempts}`);
+});
+```
+
+Use this event to display a "reconnecting…" indicator in your UI.
+
+---
+
+### `'reconnect_failed'`
+
+Fires when all reconnection attempts have been exhausted (`reconnectionAttempts` reached) without a successful connection. No arguments are passed. After this event the client stops trying and stays in the `'disconnected'` state.
+
+```javascript
+client.on('reconnect_failed', () => {
+  console.error('Maximum reconnection attempts reached. Please reload.');
+  showFatalErrorBanner();
+});
+```
+
+---
+
+### `'error'`
+
+Fires when a socket error occurs at the transport layer (connection refused, TLS handshake failure, protocol error, etc.). The handler receives the native `Error` object.
+
+```javascript
+client.on('error', (err) => {
+  console.error('Transport error:', err.message);
+});
+```
+
+An `'error'` event does not by itself close the connection — a `'disconnect'` event follows if the underlying socket is also closed. You can inspect the most recent error at any time via `client.getLastError()`.
+
+---
+
+## Full Lifecycle Example
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('wss://api.example.com', {
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  maxReconnectionDelay: 30000,
+});
+
+client.on('connect', () => {
+  console.log('✅ Connected — ID:', client.getId());
+  updateStatusIndicator('connected');
+  client.joinRoom('general');
+});
+
+client.on('disconnect', (info) => {
+  const detail = info ? `code=${info.code}` : 'TCP close';
+  console.warn(`⚠️  Disconnected (${detail})`);
+  updateStatusIndicator('disconnected');
+});
+
+client.on('reconnecting', (attempt) => {
+  const max = client.getOptions().reconnectionAttempts;
+  console.log(`🔄 Reconnecting… attempt ${attempt}/${max}`);
+  updateStatusIndicator('reconnecting');
+});
+
+client.on('reconnect_failed', () => {
+  console.error('❌ Could not reconnect — all attempts exhausted');
+  updateStatusIndicator('failed');
+  showReloadPrompt();
+});
+
+client.on('error', (err) => {
+  console.error('🔥 Transport error:', err.message);
+  reportToSentry(err);
+});
+
+client.connect();
+```
+
+---
+
+## Connection State Machine
+
+`StelarClient` is always in exactly one of four states. Call `client.getState()` to read the current state as a string.
+
+```javascript
+console.log(client.getState()); // 'connected'
+```
+
+| State | Meaning |
+|-------|---------|
+| `'disconnected'` | No active connection. No reconnection scheduled. |
+| `'connecting'` | Performing initial socket connect / WebSocket handshake. |
+| `'connected'` | Handshake complete. Messages can be sent and received. |
+| `'reconnecting'` | Previous connection lost. Waiting for the next retry delay. |
+
+**Transition table:**
+
+| From | To | Trigger |
+|------|----|---------|
+| `'disconnected'` | `'connecting'` | `.connect()` called |
+| `'connecting'` | `'connected'` | Handshake succeeded |
+| `'connecting'` | `'reconnecting'` | Handshake failed, `reconnection: true` |
+| `'connecting'` | `'disconnected'` | Handshake failed, `reconnection: false` |
+| `'connected'` | `'disconnected'` | `.disconnect()` called manually |
+| `'connected'` | `'reconnecting'` | Socket closed unexpectedly, `reconnection: true` |
+| `'reconnecting'` | `'connecting'` | Retry delay elapsed, next attempt starting |
+| `'reconnecting'` | `'disconnected'` | Max attempts reached, or `.disconnect()` called |
+
+### `onStateChange` hook
+
+The `onStateChange` hook in `StelarClientHooks` fires synchronously on every state transition and receives `{ from, to }`. Use it to drive UI state without polling.
+
+```javascript
+const client = new StelarClient('wss://api.example.com', {
+  hooks: {
+    onStateChange: ({ from, to }) => {
+      console.log(`State: ${from} → ${to}`);
+
+      if (to === 'reconnecting') showReconnectingBanner();
+      if (to === 'connected')    hideReconnectingBanner();
+      if (to === 'disconnected') showOfflineBadge();
+    },
+  },
+});
+```
+
+<Tip>
+  `onStateChange` is the recommended way to keep UI elements in sync with the connection state — it fires before built-in events like `'connect'` and `'reconnecting'`, giving you a single, consistent hook for all transitions.
+</Tip>
+
+---
+
+## Message Queue Behavior
+
+When `.emit()` is called while the client is **not** connected (`'disconnected'`, `'connecting'`, or `'reconnecting'`) and `reconnection` is enabled, the message is placed into an internal FIFO queue rather than dropped.
+
+- The queue holds up to `messageQueueSize` messages (default `100`). When full, the **oldest** message is discarded to make room for the new one.
+- On every successful reconnection, the full queue is drained in order and each message is written to the socket.
+- Binary messages sent via `.emitBinary()` are **not** queued — they are silently dropped if the client is not connected.
+
+### `onMessageQueued` hook
+
+Fires each time a message is added to the offline queue.
+
+```javascript
+hooks: {
+  onMessageQueued: ({ event, data, queueSize }) => {
+    console.log(`Queued "${event}" — queue depth: ${queueSize}`);
+  },
+},
+```
+
+### `onQueueDrained` hook
+
+Fires once after all queued messages have been written to the socket following a reconnection. The `count` field reports how many messages were flushed.
+
+```javascript
+hooks: {
+  onQueueDrained: ({ count }) => {
+    console.log(`${count} offline messages delivered after reconnect`);
+  },
+},
+```
+
+### `getQueueSize()`
+
+Returns the number of messages currently waiting in the queue.
+
+```javascript
+console.log('Pending offline messages:', client.getQueueSize());
+```
+
+<Warning>
+  Setting `messageQueueSize: 0` **disables the message queue entirely**. Any `.emit()` call made while disconnected will be silently dropped — even if `reconnection: true`. Use this only when stale messages must never be delivered out of order (e.g. real-time cursor positions or ephemeral game state).
+</Warning>

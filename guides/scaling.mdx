@@ -1,0 +1,84 @@
+---
+title: "Scale stelar-time-real Horizontally with Redis"
+sidebarTitle: "Scaling"
+description: "Bridge multiple stelar-time-real instances across machines using Redis Pub/Sub — each instance stays lightweight while events propagate globally via publish/subscribe."
+---
+
+Each stelar-time-real process manages its own in-memory client map, room registry, and message queues. This single-process design is intentional: it keeps the library zero-dependency and latency extremely low within one instance. When you need to scale beyond a single server — whether to add redundancy or handle more concurrent connections — the recommended approach is to bridge instances using **Redis Pub/Sub**. Each instance publishes outgoing events to a Redis channel; every instance subscribes to that channel and rebroadcasts the messages it receives to its own connected clients.
+
+## Performance baseline
+
+Before reaching for horizontal scaling, understand what a single instance can handle:
+
+| Metric | Value |
+|---|---|
+| RAM per connected client | ~58 KB |
+| Connections per 1 GB RAM | ~17,000 |
+| Throughput (50 WS + 20 TCP) | ~3,425 msg/sec |
+| Stable heap (70 clients) | ~10 MB |
+| Memory leaks detected | None |
+
+## Redis Pub/Sub pattern
+
+The bridge pattern is straightforward: use `stelar.onAll()` to intercept every event on the current instance and publish it to Redis. On the subscriber side, forward the message to every client on this instance via `stelar.broadcast()`:
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+import Redis from 'redis';
+
+const redis = Redis.createClient();
+const stelar = new StelarServer({ port: 3000, tcpPort: 3001 });
+
+// When a broadcast happens on this instance, publish to Redis
+stelar.onAll((ctx) => {
+  redis.publish('stelar:events', JSON.stringify({
+    event: ctx.eventName,
+    data: ctx.data,
+    excludeId: ctx.id,
+  }));
+});
+
+// When another instance publishes, emit locally
+redis.subscribe('stelar:events', (message) => {
+  const { event, data, excludeId } = JSON.parse(message);
+  stelar.broadcast(event, data, excludeId);
+});
+
+await stelar.start();
+```
+
+Each instance runs this same code. When client A (on instance 1) sends a message, instance 1 publishes it to Redis, and all other instances receive it and broadcast it to their own clients.
+
+<Info>
+  Client lookup by ID uses an indexed `Map` internally, giving O(1) access time regardless of how many clients are connected. This means per-instance routing (e.g., `stelar.toId()`) remains fast even at tens of thousands of connections — a useful property when building targeted cross-instance delivery on top of the Redis bridge.
+</Info>
+
+<Note>
+  Rooms are per-instance. If client A is in room `general` on instance 1 and client B is in room `general` on instance 2, a call to `stelar.to('general', ...)` on instance 1 will only reach clients in that room on instance 1. For cross-instance room targeting, either route connections from the same room to the same instance (sticky sessions), or broadcast globally and filter on the receiving end.
+</Note>
+
+## Monitoring with getStats()
+
+Call `stelar.getStats()` on any instance to get a real-time snapshot of its health. This is useful for load-balancer health checks and observability dashboards:
+
+```javascript
+const stats = stelar.getStats();
+console.log(stats);
+
+// {
+//   totalConnections: 150,
+//   activeConnections: 42,
+//   totalMessagesReceived: 5000,
+//   totalMessagesSent: 4800,
+//   totalRooms: 12,
+//   uptime: 3600000,
+//   uptimeSeconds: 3600,
+//   wsConnections: 38,
+//   tcpConnections: 4,
+//   memoryMB: 10.54,
+//   memoryUsage: { heapUsed: ..., heapTotal: ..., rss: ..., external: ... },
+//   rateLimiterEntries: 42
+// }
+```
+
+You can expose this data through the built-in `/health` endpoint or via a custom health handler. In a multi-instance setup, scrape `getStats()` from each instance and aggregate the results to get a cluster-wide view of connections, throughput, and memory.

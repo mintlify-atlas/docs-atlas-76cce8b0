@@ -1,0 +1,402 @@
+---
+title: "StelarContext — Event Handler Context Object"
+sidebarTitle: "StelarContext"
+description: "StelarContext is passed to every event handler, containing client info, received data, and all send/room/metadata methods."
+---
+
+Every handler registered with `.on()`, `.onAck()`, `.onConnection()`, `.onDisconnect()`, or `.use()` receives a single `StelarContext` object as its only argument. It bundles the client's identity, the received payload, and every action you can take in response — sending messages, managing rooms, storing metadata, and sending ACK replies.
+
+```javascript
+server.on('chat', (ctx) => {
+  // ctx is a StelarContext
+  console.log(ctx.id, ctx.data);
+  ctx.broadcast('chat', ctx.data, ctx.id);
+});
+```
+
+---
+
+## Properties
+
+<ResponseField name="id" type="string">
+  The unique string ID assigned to this client on connection. Generated with `randomUUID()` by default, or with a custom `generateClientId` function if configured.
+</ResponseField>
+
+<ResponseField name="socket" type="net.Socket">
+  The raw underlying `net.Socket`. Avoid writing to it directly — use the context send methods instead. Useful for low-level checks such as `ctx.socket.destroyed`.
+</ResponseField>
+
+<ResponseField name="req" type="IncomingMessage | null">
+  The HTTP upgrade request object for WebSocket clients. Contains headers, URL, and query string. Always `null` for TCP clients.
+
+  ```javascript
+  server.use((ctx, next) => {
+    const token = ctx.req?.headers?.authorization;
+    if (!token) return ctx.socket.destroy();
+    next();
+  });
+  ```
+</ResponseField>
+
+<ResponseField name="data" type="unknown">
+  The JSON-decoded payload received from the client for the current event. For binary frames, this field is set to the raw `Buffer`; use `ctx.buffer` and `ctx.isBinary` to distinguish.
+</ResponseField>
+
+<ResponseField name="buffer" type="Uint8Array">
+  Present on binary frames. Contains the raw bytes sent by the client. Check `ctx.isBinary === true` before accessing.
+</ResponseField>
+
+<ResponseField name="isBinary" type="boolean">
+  `true` when the incoming frame is binary (WebSocket `OP_BINARY` or TCP `FRAME_BINARY`). `false` or `undefined` for JSON frames.
+</ResponseField>
+
+<ResponseField name="event" type="string">
+  The event name that triggered this handler invocation.
+</ResponseField>
+
+<ResponseField name="clientInfo" type="StelarClientInfo">
+  Full metadata record for this client. See the sub-fields below.
+
+  <Expandable title="StelarClientInfo fields">
+    <ResponseField name="clientInfo.rooms" type="Set<string>">
+      The set of room names this client is currently a member of.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.metadata" type="Map<string, unknown>">
+      Arbitrary key-value store for application data (roles, user IDs, session tokens, etc). Write with `ctx.setMetadata()`, read with `ctx.getMetadata()`.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.remoteAddress" type="string">
+      The client's IP address. Respects `X-Forwarded-For` for WebSocket clients behind proxies.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.protocol" type="'ws' | 'tcp'">
+      Whether the client is connected over WebSocket or the custom binary TCP protocol.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.connectedAt" type="number">
+      Unix timestamp (milliseconds) of when the client connected.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.messagesReceived" type="number">
+      Total number of messages received from this client since connection.
+    </ResponseField>
+
+    <ResponseField name="clientInfo.messagesSent" type="number">
+      Total number of messages sent to this client since connection.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Send Methods
+
+### `.emit(event, data)`
+
+Send a named event with a JSON payload to this specific client only.
+
+```typescript
+ctx.emit(event: string, data: unknown): void
+```
+
+```javascript
+server.onConnection((ctx) => {
+  ctx.emit('welcome', { id: ctx.id, ts: Date.now() });
+});
+```
+
+---
+
+### `.send(respId, data)`
+
+ACK response shorthand. Sends a reply tagged with `_isAck: true` and the current correlation ID back to the requesting client. Equivalent to calling `ctx.emit()` but with ACK metadata attached.
+
+```typescript
+ctx.send(respId: string, data: unknown): void
+```
+
+```javascript
+server.onAck('ping', (ctx) => {
+  ctx.send('ping', { pong: true, ts: Date.now() });
+});
+```
+
+---
+
+### `.emitBinary(event, buffer)`
+
+Send raw binary data to this client. The `buffer` is an `ArrayBuffer`; the server wraps it in the appropriate binary frame for the client's protocol (WebSocket binary frame or TCP `FRAME_BINARY`).
+
+```typescript
+ctx.emitBinary(event: string, buffer: ArrayBuffer): void
+```
+
+```javascript
+server.on('request-file', (ctx) => {
+  const fileBuffer = fs.readFileSync('asset.png');
+  ctx.emitBinary('file', fileBuffer.buffer);
+});
+```
+
+---
+
+### `.broadcast(event, data)`
+
+Send a named JSON event to **all connected clients**, automatically excluding the current client (self).
+
+```typescript
+ctx.broadcast(event: string, data: unknown): void
+```
+
+```javascript
+server.on('chat', (ctx) => {
+  // Everyone except the sender receives this
+  ctx.broadcast('chat', { from: ctx.id, text: ctx.data.text });
+});
+```
+
+---
+
+### `.broadcastBinary(event, buf)`
+
+Broadcast raw binary data to all connected clients. The current client is included (not excluded automatically — use `server.broadcastBinary()` from outside a handler for more control).
+
+```typescript
+ctx.broadcastBinary(event: string, buf: ArrayBuffer): void
+```
+
+```javascript
+server.on('audio-chunk', (ctx) => {
+  ctx.broadcastBinary('audio-chunk', ctx.buffer.buffer);
+});
+```
+
+---
+
+### `.to(room, event, data)`
+
+Send a JSON event to all clients in a room, **excluding the current client**.
+
+```typescript
+ctx.to(room: string, event: string, data: unknown): void
+```
+
+```javascript
+server.on('joinChannel', (ctx) => {
+  ctx.joinRoom(ctx.data.channel);
+  ctx.to(ctx.data.channel, 'userJoined', { userId: ctx.id });
+});
+```
+
+---
+
+### `.toId(id, event, data)`
+
+Send a JSON event to a specific client by ID using an O(1) indexed `Map` lookup.
+
+```typescript
+ctx.toId(id: string, event: string, data: unknown): void
+```
+
+```javascript
+server.on('dm', (ctx) => {
+  ctx.toId(ctx.data.recipientId, 'dm', {
+    from: ctx.id,
+    text: ctx.data.text,
+  });
+});
+```
+
+---
+
+## Room Methods
+
+### `.joinRoom(room)`
+
+Add the current client to a named room. Respects `maxRooms` and `maxRoomsPerClient` server limits. The server sends a `joined-room` confirmation frame back to the client. The `onClientJoinRoom` hook fires and can veto the join by returning `false`.
+
+```typescript
+ctx.joinRoom(room: string): void
+```
+
+```javascript
+server.on('subscribe', (ctx) => {
+  ctx.joinRoom(ctx.data.channel);
+});
+```
+
+---
+
+### `.leaveRoom(room)`
+
+Remove the current client from a named room. The room is deleted automatically when its last member leaves. The server sends a `left-room` confirmation frame. The `onClientLeaveRoom` hook fires and can veto by returning `false`.
+
+```typescript
+ctx.leaveRoom(room: string): void
+```
+
+```javascript
+server.on('unsubscribe', (ctx) => {
+  ctx.leaveRoom(ctx.data.channel);
+});
+```
+
+---
+
+### `.getClients(room?)`
+
+Returns the list of all connected clients, or only those in `room` if provided. Each entry includes the client's ID and their current room list.
+
+```typescript
+ctx.getClients(room?: string): { id: string; rooms: string[] }[]
+```
+
+```javascript
+server.on('who-is-here', (ctx) => {
+  const members = ctx.getClients(ctx.data.room);
+  ctx.emit('room-members', members.map(c => c.id));
+});
+```
+
+---
+
+## Metadata
+
+Metadata is stored per-client in a `Map<string, unknown>` and persists for the lifetime of the connection. It is never sent to the client.
+
+### `.setMetadata(key, value)`
+
+Store an arbitrary value on the client. Accepts any serializable or non-serializable value.
+
+```typescript
+ctx.setMetadata(key: string, value: unknown): void
+```
+
+```javascript
+server.use((ctx, next) => {
+  const userId = verifyToken(ctx.req?.headers?.authorization);
+  ctx.setMetadata('userId', userId);
+  ctx.setMetadata('role', 'user');
+  next();
+});
+```
+
+---
+
+### `.getMetadata(key)`
+
+Retrieve a previously stored metadata value. Returns `undefined` if the key does not exist.
+
+```typescript
+ctx.getMetadata(key: string): unknown
+```
+
+```javascript
+server.on('admin-action', (ctx) => {
+  const role = ctx.getMetadata('role');
+  if (role !== 'admin') return ctx.emit('error', { message: 'Forbidden' });
+  // proceed...
+});
+```
+
+---
+
+## ACK
+
+### `.ack(ackName, data)`
+
+Manually invoke a registered ACK handler by name and send its return value to the current client. Useful when you need to trigger an ACK response from inside a regular event handler rather than an `.onAck()` handler.
+
+```typescript
+ctx.ack(ackName: string, data: unknown): void
+```
+
+```javascript
+server.on('request-data', (ctx) => {
+  ctx.ack('getData', { query: ctx.data.query });
+});
+```
+
+---
+
+## Full Handler Example
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+const server = new StelarServer({ port: 3000 });
+
+// Middleware: authenticate every connection
+server.use((ctx, next) => {
+  const token = ctx.req?.headers?.authorization;
+  if (!token) return ctx.socket.destroy();
+  ctx.setMetadata('userId', verifyToken(token));
+  ctx.setMetadata('role', 'user');
+  next();
+});
+
+// Connection handler
+server.onConnection((ctx) => {
+  console.log(
+    `[${ctx.clientInfo.protocol}] ${ctx.id} connected from ${ctx.clientInfo.remoteAddress}`
+  );
+  ctx.emit('welcome', { id: ctx.id });
+});
+
+// Chat handler — full use of ctx
+server.on('chat', (ctx) => {
+  const userId = ctx.getMetadata('userId');
+  const message = {
+    from: userId,
+    text: ctx.data.text,
+    room: ctx.data.room,
+    ts: Date.now(),
+  };
+
+  if (ctx.data.room) {
+    // Send to room, excluding sender
+    ctx.to(ctx.data.room, 'chat', message);
+  } else {
+    // Broadcast to everyone, excluding sender
+    ctx.broadcast('chat', message);
+  }
+});
+
+// Join a room
+server.on('join', (ctx) => {
+  ctx.joinRoom(ctx.data.room);
+  const members = ctx.getClients(ctx.data.room);
+  ctx.emit('joined', { room: ctx.data.room, memberCount: members.length });
+  ctx.to(ctx.data.room, 'user-joined', { userId: ctx.id });
+});
+
+// Direct message — O(1) send
+server.on('dm', (ctx) => {
+  ctx.toId(ctx.data.to, 'dm', {
+    from: ctx.getMetadata('userId'),
+    text: ctx.data.text,
+  });
+});
+
+// Binary file upload
+server.on('file-upload', (ctx) => {
+  if (!ctx.isBinary) return ctx.emit('error', { message: 'Binary required' });
+  processFile(ctx.buffer);
+  ctx.emit('file-upload-ok', { size: ctx.buffer.byteLength });
+});
+
+// Request-response ACK
+server.onAck('getProfile', (ctx) => {
+  const userId = ctx.getMetadata('userId');
+  return { userId, name: 'Alice', role: ctx.getMetadata('role') };
+});
+
+// Disconnect
+server.onDisconnect((ctx) => {
+  console.log(`Client disconnected: ${ctx.id}`);
+});
+
+await server.start();
+console.log('Server ready on port', server.getPort());
+```

@@ -1,0 +1,197 @@
+---
+title: "Rate Limiting: Global, Per-Event, and Per-Client"
+sidebarTitle: "Rate Limiting"
+description: "Token-bucket rate limiting with global, per-event, and per-client overrides; custom IRateLimiter interface for Redis and other backends."
+---
+
+Rate limiting prevents clients from flooding the server with messages — protecting against spam, denial-of-service attacks, and runaway bugs. stelar-time-real uses a **token-bucket algorithm** by default: each client gets a fixed number of tokens per time window. When the bucket is empty, the client is disconnected (or warned, if you use the hook).
+
+Rate limiting applies to both WebSocket and TCP connections with the same configuration.
+
+---
+
+## Global Rate Limit
+
+Set the default limit for all clients via the `rateLimit` option on `StelarServer`:
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({
+  port: 3000,
+  rateLimit: {
+    maxPoints: 100,   // Maximum messages per window
+    windowMs:  1000,  // Window duration in milliseconds
+  },
+});
+```
+
+The example above allows each client to send up to **100 messages per second**. The counter resets at the end of each window.
+
+Set `rateLimit: false` to disable the built-in rate limiter entirely (useful when you supply a `customRateLimiter`):
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  rateLimit: false,
+});
+```
+
+<Warning>
+  The global rate limit counts **all events together** — a client that sends 100 `typing` events has exhausted its quota even if it never sent a `chat` event. Use `eventRateLimits` for fine-grained per-event control.
+</Warning>
+
+---
+
+## Per-Event Rate Limits
+
+Use `eventRateLimits` to assign an independent token bucket to individual events. Event-specific limits are evaluated **in addition to** the global limit — the first check to fail triggers a disconnect.
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  rateLimit: { maxPoints: 100, windowMs: 1000 }, // Global: 100 msg/sec
+
+  eventRateLimits: {
+    'chat':        { maxPoints: 5,  windowMs: 1000  }, // 5 chats/sec
+    'file-upload': { maxPoints: 2,  windowMs: 10000 }, // 2 uploads per 10s
+    'typing':      { maxPoints: 10, windowMs: 1000  }, // 10 typing/sec
+    'location':    { maxPoints: 1,  windowMs: 5000  }, // 1 location per 5s
+  },
+});
+```
+
+### Runtime Management
+
+Add or remove event rate limits without restarting the server:
+
+```javascript
+// Add a rate limit for a new event
+stelar.setEventRateLimit('voice', { maxPoints: 50, windowMs: 1000 });
+
+// Remove an event rate limit (falls back to global)
+stelar.removeEventRateLimit('voice');
+```
+
+---
+
+## Per-Client Rate Limits
+
+Override the rate limit for specific clients. This is useful for granting higher quotas to premium users, verified bots, or internal services.
+
+```javascript
+stelar.onConnection((client) => {
+  const role = client.getMetadata('role');
+
+  if (role === 'premium') {
+    // Premium users: 500 messages/sec
+    stelar.setClientRateLimit(client.id, { maxPoints: 500, windowMs: 1000 });
+  } else if (role === 'bot') {
+    // Verified bots: 1000 messages/sec
+    stelar.setClientRateLimit(client.id, { maxPoints: 1000, windowMs: 1000 });
+  }
+  // Free users: falls through to the global limit (100 msg/sec)
+});
+
+// Revert to global limit (e.g. if user downgrades)
+stelar.removeClientRateLimit(clientId);
+```
+
+### Priority Order
+
+When a message arrives, rate-limit checks are evaluated in this order — the first matching check wins:
+
+1. **Per-client override** — `setClientRateLimit(id, config)`
+2. **Event-specific limit** — `eventRateLimits` map
+3. **Global limit** — `rateLimit` option
+4. **Custom rate limiter** — `customRateLimiter` option
+
+---
+
+## Custom Rate Limiter
+
+Implement the `IRateLimiter` interface to replace the built-in token bucket entirely. This is ideal for distributed environments where rate-limit state must be shared across multiple server instances.
+
+```typescript
+interface IRateLimiter {
+  check(id: string, cost?: number): boolean; // Return false to block
+  reset(id: string): void;                   // Called on client disconnect
+  cleanup(): void;                           // Called every 30 seconds
+  size(): number;                            // Number of tracked entries
+}
+```
+
+### Redis Example
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+class RedisRateLimiter {
+  constructor(redisClient) {
+    this.redis = redisClient;
+  }
+
+  async check(id, cost = 1) {
+    const key = `ratelimit:${id}`;
+    const current = await this.redis.incr(key);
+    if (current === 1) {
+      // Set expiry only on first increment of the window
+      await this.redis.expire(key, 1); // 1-second window
+    }
+    return current <= 100; // Allow up to 100 messages per second
+  }
+
+  async reset(id) {
+    await this.redis.del(`ratelimit:${id}`);
+  }
+
+  async cleanup() {
+    // Redis handles key expiration automatically — nothing to do
+  }
+
+  async size() {
+    return 0; // Not meaningful with Redis TTL-based keys
+  }
+}
+
+const stelar = new StelarServer({
+  port: 3000,
+  customRateLimiter: new RedisRateLimiter(redisClient),
+});
+```
+
+With a Redis-backed limiter, rate-limit state is consistent across all instances of your application — a client cannot bypass the limit by connecting to a different pod.
+
+---
+
+## Reacting to Rate Limit Events
+
+<Tip>
+  Use the `onRateLimitExceeded` hook to log, alert, or auto-ban abusive clients instead of silently disconnecting them. Returning `false` from the hook prevents the disconnect, letting you implement a warn-before-ban policy.
+</Tip>
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  rateLimit: { maxPoints: 100, windowMs: 1000 },
+
+  hooks: {
+    onRateLimitExceeded: ({ clientId, event, protocol }) => {
+      // Log every violation
+      console.warn(`[${protocol}] Rate limit exceeded: ${clientId} on "${event ?? 'global'}"`);
+
+      // Track violations and ban after 5 hits
+      const violations = incrementViolations(clientId);
+      if (violations >= 5) {
+        banClient(clientId); // Your ban logic
+        return; // Allow default disconnect
+      }
+
+      // For the first 4 violations: warn but do not disconnect
+      return false;
+    },
+  },
+});
+```
+
+You can also update hooks at runtime via `stelar.updateConfig({ hooks: { ... } })` without restarting.

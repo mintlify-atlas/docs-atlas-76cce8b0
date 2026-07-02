@@ -1,0 +1,111 @@
+---
+title: "Send Binary Data, Files, and Images in Real Time"
+sidebarTitle: "Binary Data"
+description: "Send files, images, audio, and raw buffers without base64 overhead using emitBinary — ctx.data is a Buffer on binary events, supported on both protocols."
+---
+
+stelar-time-real transmits binary data natively over both WebSocket and TCP connections, avoiding the ~33% overhead of base64 encoding. When a binary event arrives on the server, `ctx.data` is a `Buffer` (a `Uint8Array` subclass) containing the raw bytes — no decoding step needed. Both protocols use a length-prefixed framing scheme so the binary payload is never corrupted or fragmented regardless of network conditions.
+
+## Server side: receiving and broadcasting binary
+
+```javascript
+// Receive a binary event and broadcast the raw buffer to all other clients
+stelar.on('file', (ctx) => {
+  ctx.broadcastBinary('file', ctx.data); // ctx.data is a Buffer
+});
+```
+
+`broadcastBinary(event, buffer)` sends the binary frame to every connected client (WebSocket and TCP alike). You can also target a specific room:
+
+```javascript
+stelar.on('file', (ctx) => {
+  // Broadcast to everyone in the uploader's first room
+  const room = [...ctx.clientInfo.rooms][0];
+  if (room) ctx.to(room, 'file', ctx.data);
+});
+```
+
+## Client side: sending binary
+
+```javascript
+// Send an ArrayBuffer or Buffer
+const buffer = Buffer.from('binary data');
+client.emitBinary('file', buffer);
+
+// Convenience helpers
+client.sendFile(fileArrayBuffer);   // Emits the 'file' event
+client.sendImage(imageArrayBuffer); // Emits the 'image' event
+```
+
+`sendFile` and `sendImage` are thin wrappers around `emitBinary` that fix the event name to `'file'` and `'image'` respectively, matching the server-side handler convention.
+
+## Receiving binary on the client
+
+```javascript
+client.on('file', (buffer) => {
+  console.log('File received:', buffer.byteLength, 'bytes');
+  // buffer is an ArrayBuffer in both browser and Node.js
+});
+```
+
+## Full example: upload, broadcast, and save
+
+```javascript
+// --- Server ---
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({ port: 3000 });
+
+stelar.on('file', (ctx) => {
+  console.log(`Received file: ${ctx.data.length} bytes from ${ctx.id}`);
+  ctx.broadcastBinary('file', ctx.data); // Forward to all other clients
+});
+
+await stelar.start();
+
+// --- Sender client (Node.js) ---
+import { StelarClient } from 'stelar-time-real';
+import fs from 'fs/promises';
+
+const sender = new StelarClient('localhost:3000');
+sender.connect();
+
+sender.on('connect', async () => {
+  const imageBuffer = await fs.readFile('photo.png');
+  sender.emitBinary('file', imageBuffer);
+  console.log('File sent:', imageBuffer.length, 'bytes');
+});
+
+// --- Receiver client (Node.js) ---
+const receiver = new StelarClient('localhost:3000');
+receiver.connect();
+
+receiver.on('file', async (buffer) => {
+  console.log('File received:', buffer.byteLength, 'bytes');
+  await fs.writeFile('received.png', Buffer.from(buffer));
+});
+```
+
+<Note>
+  `ctx.data` is a `Buffer` (a `Uint8Array`) on binary events server-side. On the client side, binary data is delivered as an `ArrayBuffer` in both Node.js and browsers, matching the standard Web API. Use `Buffer.from(buffer)` in Node.js to convert back to a `Buffer` when writing to disk.
+</Note>
+
+<Tip>
+  Increase `maxPayloadSize` and `maxFrameSize` in the server options when you need to transfer large files. The defaults are both 10 MB. For example, to allow 50 MB uploads:
+
+  ```javascript
+  const stelar = new StelarServer({
+    maxPayloadSize: 50 * 1024 * 1024,
+    maxFrameSize:   50 * 1024 * 1024,
+  });
+  ```
+
+  Set matching values on the client so outbound frames are accepted:
+
+  ```javascript
+  const client = new StelarClient('localhost:3000', {
+    maxPayloadSize: 50 * 1024 * 1024,
+    maxFrameSize:   50 * 1024 * 1024,
+  });
+  ```
+</Tip>

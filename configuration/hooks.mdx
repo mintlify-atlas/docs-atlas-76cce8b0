@@ -1,0 +1,465 @@
+---
+title: "Server and Client Hook System Reference"
+sidebarTitle: "Hooks"
+description: "Complete reference for all server StelarHooks and client hooks; lifecycle callbacks for every internal event, return false to cancel default actions."
+---
+
+Hooks let you intercept and react to internal events in both the server and the client. They are plain functions attached at construction time (or updated at runtime) that fire synchronously when an event occurs.
+
+The key rule: **returning `false` from any hook that supports cancellation will prevent the default action** — such as disconnecting a client, rejecting a room join, or sending a broadcast.
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  hooks: {
+    onRateLimitExceeded: ({ clientId }) => {
+      console.warn('Spammer detected:', clientId);
+      return false; // Warn but do NOT disconnect
+    },
+  },
+});
+```
+
+---
+
+## Server Hooks (`StelarHooks`)
+
+### `onRateLimitExceeded`
+
+Fires when a client exceeds the rate limit (global, event-specific, or per-client).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | ID of the offending client |
+| `event` | `string \| undefined` | Event name that triggered the limit (omitted for global checks) |
+| `protocol` | `'ws' \| 'tcp'` | Protocol the client is connected over |
+
+**Return `false`** to keep the client connected instead of disconnecting them.
+
+```javascript
+onRateLimitExceeded: ({ clientId, event, protocol }) => {
+  metrics.increment('rate_limit.exceeded', { protocol });
+  if (event === 'typing') return false; // Never disconnect for typing spam
+}
+```
+
+---
+
+### `onMaxConnectionsReached`
+
+Fires when a new connection attempt is rejected because the global `maxConnections` limit has been reached. The incoming socket is always destroyed — this hook is informational only.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `activeConnections` | `number` | Current number of active connections |
+| `max` | `number` | The configured limit |
+| `ip` | `string` | IP address of the rejected client |
+
+```javascript
+onMaxConnectionsReached: ({ activeConnections, max, ip }) => {
+  alertOps(`Server at capacity: ${activeConnections}/${max}. Rejected: ${ip}`);
+}
+```
+
+---
+
+### `onMaxRoomsReached`
+
+Fires when a client tries to create a room but the global `maxRooms` limit has been reached.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client attempting the join |
+| `room` | `string` | Room name that was requested |
+| `totalRooms` | `number` | Current total room count |
+| `max` | `number` | The configured limit |
+
+**Return `false`** to allow the room creation despite the limit.
+
+---
+
+### `onMaxRoomsPerClientReached`
+
+Fires when a client tries to join another room but has already reached `maxRoomsPerClient`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client attempting the join |
+| `room` | `string` | Room name that was requested |
+| `currentRooms` | `number` | Number of rooms the client is already in |
+| `max` | `number` | The configured per-client limit |
+
+**Return `false`** to allow the join despite the limit.
+
+---
+
+### `onPayloadTooLarge`
+
+Fires when an incoming message exceeds `maxPayloadSize`. The message is always dropped — this hook is informational only.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client that sent the oversized message |
+| `event` | `string \| undefined` | Event name (if available) |
+| `size` | `number` | Actual payload size in bytes |
+| `max` | `number` | The configured limit in bytes |
+
+```javascript
+onPayloadTooLarge: ({ clientId, event, size, max }) => {
+  console.warn(`Oversized payload from ${clientId}: ${size} bytes (limit ${max})`);
+}
+```
+
+---
+
+### `onInvalidMessage`
+
+Fires when an incoming message cannot be parsed (malformed JSON, invalid binary frame, etc.).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client that sent the invalid message |
+| `reason` | `string` | Human-readable description of the parse failure |
+| `protocol` | `'ws' \| 'tcp'` | Protocol |
+
+---
+
+### `onClientJoinRoom`
+
+Fires just before a client is added to a room, after all limit checks have passed.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client requesting the join |
+| `room` | `string` | Target room name |
+| `metadata` | `Map<string, unknown>` | Client's metadata map |
+
+**Return `false`** to reject the room join. The client will not be added and will receive no confirmation.
+
+```javascript
+onClientJoinRoom: ({ clientId, room, metadata }) => {
+  const role = metadata.get('role');
+  if (room.startsWith('admin-') && role !== 'admin') {
+    return false; // Block non-admins from admin rooms
+  }
+  if (room.startsWith('vip-') && !metadata.get('isPremium')) {
+    return false; // Block non-premium from VIP rooms
+  }
+}
+```
+
+---
+
+### `onClientLeaveRoom`
+
+Fires just before a client is removed from a room.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Client requesting the leave |
+| `room` | `string` | Room being left |
+
+**Return `false`** to prevent the leave operation.
+
+---
+
+### `onBeforeBroadcast`
+
+Fires before every broadcast (server-initiated or triggered by a client action via `ctx.broadcast`).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `string` | Event being broadcast |
+| `data` | `unknown` | Payload |
+| `excludeId` | `string \| undefined` | Client ID excluded from broadcast, if any |
+
+**Return `false`** to cancel the broadcast entirely.
+
+```javascript
+onBeforeBroadcast: ({ event, data }) => {
+  if (event === 'system-debug' && process.env.NODE_ENV === 'production') {
+    return false; // Never broadcast debug events in production
+  }
+}
+```
+
+---
+
+### `onClientConnect`
+
+Fires after a client has been registered and all middleware has run. Informational only — the connection cannot be cancelled here (use middleware for that).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Newly assigned client ID |
+| `ip` | `string` | Client's IP address |
+| `protocol` | `'ws' \| 'tcp'` | Protocol |
+| `metadata` | `Map<string, unknown>` | Client's metadata map (may already be populated by middleware) |
+
+---
+
+### `onClientDisconnect`
+
+Fires after a client has disconnected and been unregistered. Room memberships have already been cleaned up.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `clientId` | `string` | Disconnected client's ID |
+| `ip` | `string` | Client's IP address |
+| `protocol` | `'ws' \| 'tcp'` | Protocol |
+| `rooms` | `Set<string>` | Snapshot of rooms the client was in at disconnect time |
+
+---
+
+## Client Hooks (`StelarClientHooks`)
+
+Client hooks are configured via the `hooks` option on `StelarClient`.
+
+### `onBeforeEmit`
+
+Fires before every outgoing message. **Return `false`** to cancel the send.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `string` | Event name |
+| `data` | `unknown` | Payload |
+
+```javascript
+onBeforeEmit: ({ event, data }) => {
+  if (event === 'debug' && !isDev) return false; // No debug in production
+  console.debug('→', event, data);
+}
+```
+
+---
+
+### `onMessage`
+
+Fires for every incoming message, before any event listener is called.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `string` | Event name |
+| `data` | `unknown` | Payload (or `ArrayBuffer` for binary) |
+| `isBinary` | `boolean` | `true` for binary frames |
+
+---
+
+### `onStateChange`
+
+Fires whenever the connection state changes.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `from` | `ConnectionState` | Previous state |
+| `to` | `ConnectionState` | New state |
+
+Possible states: `'disconnected'` → `'connecting'` → `'connected'` → `'reconnecting'` → …
+
+```javascript
+onStateChange: ({ from, to }) => {
+  if (to === 'reconnecting') showOfflineBanner();
+  if (to === 'connected')    hideOfflineBanner();
+  analytics.track('connection_state_change', { from, to });
+}
+```
+
+---
+
+### `onReconnectDelay`
+
+Fires before each reconnection attempt. Return a number to override the calculated delay (in milliseconds), or return nothing to use the default exponential backoff.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `attempt` | `number` | Current reconnection attempt number (1-based) |
+| `defaultDelay` | `number` | The delay that would be used without the hook |
+
+```javascript
+onReconnectDelay: ({ attempt, defaultDelay }) => {
+  // During business hours: reconnect fast
+  const hour = new Date().getHours();
+  if (hour >= 9 && hour <= 18) return 500;
+  return defaultDelay; // Off-hours: normal exponential backoff
+}
+```
+
+---
+
+### `onMessageQueued`
+
+Fires when a message is queued because the client is currently disconnected. Useful for showing a "pending" indicator in your UI.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `string` | Event name of the queued message |
+| `data` | `unknown` | Payload |
+| `queueSize` | `number` | Current queue length after this addition |
+
+---
+
+### `onQueueDrained`
+
+Fires after all queued messages have been successfully flushed following a reconnection.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `count` | `number` | Number of messages that were sent |
+
+---
+
+### `onError`
+
+Fires when a connection or protocol error occurs.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `error` | `Error` | The error object |
+| `context` | `string` | Where the error originated: `'emit'`, `'node-ws'`, `'browser-ws'`, or `'tcp'` |
+
+---
+
+## Full Server Hooks Example
+
+```javascript
+const stelar = new StelarServer({
+  port: 3000,
+  maxConnections: 5000,
+  rateLimit: { maxPoints: 100, windowMs: 1000 },
+
+  hooks: {
+    // Access control for admin rooms
+    onClientJoinRoom: ({ clientId, room, metadata }) => {
+      const role = metadata.get('role');
+      if (room.startsWith('admin-') && role !== 'admin') {
+        console.warn(`[ACCESS DENIED] ${clientId} tried to join ${room}`);
+        return false;
+      }
+    },
+
+    // Warn on rate limit, auto-ban repeat offenders
+    onRateLimitExceeded: ({ clientId, event, protocol }) => {
+      const count = incrementAbuse(clientId);
+      console.warn(`[RATE LIMIT] ${clientId} on "${event}" (offense #${count})`);
+
+      if (count >= 10) {
+        banlist.add(clientId);
+        return; // Disconnect on 10th offense
+      }
+      return false; // Warn only for first 9 offenses
+    },
+
+    // Metrics on connection/disconnection
+    onClientConnect: ({ clientId, ip, protocol }) => {
+      metrics.gauge('active_connections', stelar.getStats().activeConnections);
+      console.log(`[+] ${clientId} (${protocol}) from ${ip}`);
+    },
+
+    onClientDisconnect: ({ clientId, rooms }) => {
+      metrics.gauge('active_connections', stelar.getStats().activeConnections);
+      console.log(`[-] ${clientId} left ${rooms.size} room(s)`);
+    },
+
+    // Alert when server approaches capacity
+    onMaxConnectionsReached: ({ activeConnections, max, ip }) => {
+      notifyOps(`Server full (${activeConnections}/${max}). Rejected: ${ip}`);
+    },
+
+    // Log oversized payloads
+    onPayloadTooLarge: ({ clientId, event, size, max }) => {
+      console.warn(`[PAYLOAD] ${clientId} sent ${size} bytes on "${event}" (limit ${max})`);
+    },
+
+    // Intercept certain broadcasts
+    onBeforeBroadcast: ({ event }) => {
+      if (event === 'internal-debug') return false;
+    },
+  },
+});
+```
+
+---
+
+## Full Client Hooks Example
+
+```javascript
+const client = new StelarClient('wss://app.example.com', {
+  hooks: {
+    // UI feedback on state changes
+    onStateChange: ({ from, to }) => {
+      console.log(`State: ${from} → ${to}`);
+      updateStatusIndicator(to);
+
+      if (to === 'reconnecting') showReconnectingOverlay();
+      if (to === 'connected')    hideReconnectingOverlay();
+    },
+
+    // Track all received messages
+    onMessage: ({ event, data, isBinary }) => {
+      metrics.increment('messages.received');
+      if (isBinary) metrics.increment('messages.binary');
+    },
+
+    // Suppress debug events in production
+    onBeforeEmit: ({ event }) => {
+      if (event.startsWith('debug:') && !isDev) return false;
+    },
+
+    // Adaptive reconnection delay based on time of day
+    onReconnectDelay: ({ attempt, defaultDelay }) => {
+      const hour = new Date().getHours();
+      return (hour >= 9 && hour <= 18) ? 500 : defaultDelay;
+    },
+
+    // Notify user that messages are pending
+    onMessageQueued: ({ event, queueSize }) => {
+      if (queueSize === 1) showPendingBadge();
+    },
+
+    // Hide badge once messages are sent
+    onQueueDrained: ({ count }) => {
+      hidePendingBadge();
+      console.log(`Flushed ${count} pending message(s)`);
+    },
+
+    // Report errors
+    onError: ({ error, context }) => {
+      errorReporter.capture(error, { context, user: getUser() });
+    },
+  },
+});
+```
+
+---
+
+## Updating Hooks at Runtime
+
+Both server and client hooks can be replaced at runtime without restarting.
+
+**Server:**
+
+```javascript
+stelar.updateConfig({
+  hooks: {
+    onRateLimitExceeded: ({ clientId }) => {
+      // Replace the original hook — now auto-bans instead of warning
+      banUser(clientId);
+      return false;
+    },
+  },
+});
+// Note: updateConfig merges hooks — existing hooks not in the update are preserved
+```
+
+**Client:**
+
+```javascript
+client.updateOptions({
+  hooks: {
+    onBeforeEmit: ({ event }) => {
+      // After feature flag change: start suppressing analytics events
+      if (event.startsWith('analytics:')) return false;
+    },
+  },
+});
+```

@@ -1,0 +1,321 @@
+---
+title: "StelarServer Configuration Options Reference"
+sidebarTitle: "Server Options"
+description: "Complete reference for all StelarServer constructor options including port, limits, rate limiting, TLS, health check, and logging."
+---
+
+All configuration options are passed as a single object to the `StelarServer` constructor. Every option is optional — sensible production defaults are applied automatically.
+
+```javascript
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({ /* options here */ });
+await stelar.start();
+```
+
+---
+
+## Connection
+
+<ParamField body="port" type="number" optional>
+  The HTTP/WebSocket port to listen on. Defaults to `3000`. Ignored when `server` is provided. If the port is already in use, stelar-time-real automatically increments until a free port is found.
+</ParamField>
+
+<ParamField body="server" type="HttpServer" optional>
+  Attach to an existing Node.js `http.Server` instance instead of creating a new one. Useful when sharing a port with Express, Fastify, or another HTTP framework.
+
+  ```javascript
+  import express from 'express';
+  const app = express();
+  const httpServer = app.listen(3000);
+
+  const stelar = new StelarServer({ server: httpServer });
+  ```
+</ParamField>
+
+<ParamField body="namespace" type="string" optional>
+  WebSocket upgrade path. Only WebSocket upgrade requests matching this path are accepted. Defaults to `'/'`. Use a custom path (e.g. `'/realtime'`) to colocate stelar-time-real on a server that also serves regular HTTP.
+</ParamField>
+
+<ParamField body="tcpPort" type="number | false" optional>
+  Port for the custom binary TCP server. Set to `false` to disable TCP entirely (WebSocket only). When omitted, TCP is disabled by default. TCP is only useful for Node.js-to-Node.js communication — browsers cannot use it.
+
+  ```javascript
+  const stelar = new StelarServer({ port: 3000, tcpPort: 3001 });
+  ```
+</ParamField>
+
+---
+
+## Connection Limits
+
+<ParamField body="maxConnections" type="number">
+  Maximum number of concurrent connections across all protocols. New connections are rejected once this limit is reached and the `onMaxConnectionsReached` hook fires. Defaults to `10000`.
+</ParamField>
+
+<ParamField body="maxConnectionsPerIP" type="number">
+  Maximum number of simultaneous connections from the same IP address. Prevents bots and brute-force attacks. Defaults to `50`. Ignored when `customIPTracker` is provided.
+</ParamField>
+
+<ParamField body="maxRooms" type="number">
+  Global cap on the total number of active rooms. When reached, new room creation is blocked and `onMaxRoomsReached` fires. Defaults to `10000`.
+</ParamField>
+
+<ParamField body="maxRoomsPerClient" type="number">
+  Maximum number of rooms a single client can join. When exceeded, the join is silently dropped and `onMaxRoomsPerClientReached` fires. Defaults to `50`.
+</ParamField>
+
+<ParamField body="maxPayloadSize" type="number">
+  Maximum incoming message payload size in bytes. Messages exceeding this are dropped and `onPayloadTooLarge` fires. Defaults to `10485760` (10 MB).
+</ParamField>
+
+<ParamField body="maxFrameSize" type="number">
+  Maximum WebSocket frame size in bytes. Frames exceeding this trigger a protocol-level close. Defaults to `10485760` (10 MB). Applies to both WebSocket and TCP framing.
+</ParamField>
+
+---
+
+## Rate Limiting
+
+<ParamField body="rateLimit" type="{ maxPoints: number; windowMs: number } | false">
+  Global token-bucket rate limit applied to every connected client. `maxPoints` is the maximum number of messages allowed per `windowMs` millisecond window.
+
+  Set to `false` to disable the built-in rate limiter entirely. Defaults to `{ maxPoints: 100, windowMs: 1000 }`.
+
+  ```javascript
+  rateLimit: { maxPoints: 100, windowMs: 1000 } // 100 messages per second
+  ```
+
+  See [Rate Limiting](/configuration/rate-limiting) for per-event and per-client overrides.
+</ParamField>
+
+<ParamField body="eventRateLimits" type="EventRateLimits">
+  A map of event name to rate limit config. Each entry defines an independent token bucket for that specific event, evaluated in addition to the global limit.
+
+  ```javascript
+  eventRateLimits: {
+    'chat':        { maxPoints: 5,   windowMs: 1000  },
+    'file-upload': { maxPoints: 2,   windowMs: 10000 },
+    'typing':      { maxPoints: 10,  windowMs: 1000  },
+    'location':    { maxPoints: 1,   windowMs: 5000  },
+  }
+  ```
+</ParamField>
+
+<ParamField body="customRateLimiter" type="IRateLimiter">
+  Replace the built-in token-bucket rate limiter with your own implementation. Must implement the `IRateLimiter` interface: `check(id, cost?)`, `reset(id)`, `cleanup()`, `size()`. See [Extensibility](/configuration/extensibility) for a Redis example.
+</ParamField>
+
+---
+
+## Timeouts
+
+<ParamField body="heartbeatInterval" type="number">
+  How often (in milliseconds) the server sends a ping to each connected client. Defaults to `30000` (30 s). Use a lower value for faster dead-connection detection at the cost of more network traffic.
+</ParamField>
+
+<ParamField body="heartbeatTimeout" type="number">
+  How long (in milliseconds) the server waits for a pong response before forcibly disconnecting the client. Defaults to `60000` (60 s), which is `heartbeatInterval × 2` when omitted.
+</ParamField>
+
+<ParamField body="connectTimeout" type="number">
+  Maximum time in milliseconds a WebSocket upgrade request may stay pending before the raw socket is destroyed. Defaults to `10000` (10 s).
+</ParamField>
+
+---
+
+## Graceful Shutdown
+
+<ParamField body="gracefulShutdown" type="boolean">
+  When `true`, installs `SIGINT`/`SIGTERM` signal handlers that stop accepting new connections, notify existing clients with a close frame, and wait for them to disconnect cleanly. Defaults to `true`. Signal handlers are removed when `stelar.stop()` is called to prevent `MaxListenersExceeded` warnings on multiple instances.
+</ParamField>
+
+<ParamField body="shutdownTimeout" type="number">
+  Maximum time in milliseconds to wait for open connections to close during graceful shutdown. After this timeout, remaining sockets are forcibly destroyed. Defaults to `10000` (10 s).
+</ParamField>
+
+---
+
+## Health Check
+
+<ParamField body="healthEndpoint" type="string | false">
+  URL path for the built-in HTTP health check endpoint. Compatible with Kubernetes liveness/readiness probes, Docker Swarm health checks, and load balancers. Defaults to `'/health'`. Set to `false` to disable.
+
+  The response includes: `status`, `totalConnections`, `activeConnections`, `totalMessagesReceived`, `totalMessagesSent`, `totalRooms`, `uptime`, `wsConnections`, `tcpConnections`, `memoryMB`, and `rateLimiterEntries`.
+</ParamField>
+
+<ParamField body="customHealthHandler" type="(req, res, stats) => void">
+  Replace the built-in health handler with your own function. Receives the raw `IncomingMessage`, `ServerResponse`, and the current `StelarStats` object. See [Extensibility](/configuration/extensibility) for a full example.
+</ParamField>
+
+---
+
+## Security
+
+<ParamField body="allowedOrigins" type="string[]">
+  Whitelist of origins that are permitted to open WebSocket connections. Requests with an `Origin` header not in this list receive a `403 Forbidden` response. Pass `null` or omit the option to allow all origins. The same list is used to set `Access-Control-Allow-Origin` on the health endpoint.
+
+  ```javascript
+  allowedOrigins: ['https://app.example.com', 'https://admin.example.com']
+  ```
+</ParamField>
+
+<ParamField body="tls" type="TlsOptions">
+  Enable TLS for both `wss://` WebSocket and TCP connections. Pass an object with `key` and `cert` (as `Buffer` or `string`).
+
+  ```javascript
+  import { readFileSync } from 'fs';
+
+  tls: {
+    key:  readFileSync('server-key.pem'),
+    cert: readFileSync('server-cert.pem'),
+  }
+  ```
+</ParamField>
+
+<ParamField body="compression" type="boolean">
+  Enable `permessage-deflate` WebSocket compression. Negotiated per-client — only clients that advertise compression support receive compressed frames. Defaults to `false`.
+</ParamField>
+
+---
+
+## Logging
+
+<ParamField body="logger" type="'debug' | 'info' | 'warn' | 'error' | 'silent' | Logger | false">
+  Controls server-side logging. Pass a log level string, a custom `Logger` instance, or `false` to silence all output. Defaults to `'info'`.
+
+  | Level | Output |
+  |-------|--------|
+  | `'debug'` | Verbose internal events |
+  | `'info'` | Start/stop, connections, shutdowns |
+  | `'warn'` | Rate limits, invalid messages, oversized payloads |
+  | `'error'` | Handler exceptions, write failures |
+  | `'silent'` | Nothing |
+</ParamField>
+
+---
+
+## Extensibility
+
+<ParamField body="customIPTracker" type="IIPTracker">
+  Replace the built-in per-IP connection tracker. Must implement `check(ip)`, `add(ip)`, `remove(ip)`, `getCount(ip)`, and `cleanup()`. Useful for Redis-backed tracking or IP blocklists. See [Extensibility](/configuration/extensibility).
+</ParamField>
+
+<ParamField body="generateClientId" type="() => string">
+  Custom function to generate unique client IDs. By default uses `crypto.randomUUID()` (UUID v4). Return any string — it must be unique per connection.
+
+  ```javascript
+  generateClientId: () => `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  ```
+</ParamField>
+
+---
+
+## Hooks
+
+<ParamField body="hooks" type="StelarHooks">
+  Lifecycle callbacks for internal server events. Each hook can optionally return `false` to cancel the default action (disconnect, reject join, etc.). See the [Hooks reference](/configuration/hooks) for the full list.
+</ParamField>
+
+---
+
+## Production Example
+
+```javascript
+import { readFileSync } from 'fs';
+import express from 'express';
+import { StelarServer } from 'stelar-time-real';
+
+const app = express();
+const httpServer = app.listen(3000);
+
+const stelar = new StelarServer({
+  // Attach to existing Express server
+  server: httpServer,
+
+  // Also open a TCP port for internal microservices
+  tcpPort: 3001,
+
+  // Connection limits
+  maxConnections: 10000,
+  maxConnectionsPerIP: 50,
+  maxRooms: 10000,
+  maxRoomsPerClient: 50,
+
+  // Payload protection
+  maxPayloadSize: 10 * 1024 * 1024, // 10 MB
+  maxFrameSize:   10 * 1024 * 1024,
+
+  // Global rate limit: 100 messages/sec per client
+  rateLimit: { maxPoints: 100, windowMs: 1000 },
+
+  // Per-event overrides
+  eventRateLimits: {
+    'chat':        { maxPoints: 5,  windowMs: 1000  },
+    'file-upload': { maxPoints: 2,  windowMs: 10000 },
+    'typing':      { maxPoints: 10, windowMs: 1000  },
+  },
+
+  // Heartbeat: ping every 30s, disconnect after 60s without pong
+  heartbeatInterval: 30000,
+  heartbeatTimeout:  60000,
+  connectTimeout:    10000,
+
+  // Health check for Kubernetes
+  healthEndpoint: '/health',
+
+  // Graceful shutdown on SIGINT/SIGTERM
+  gracefulShutdown: true,
+  shutdownTimeout:  10000,
+
+  // Origin whitelist
+  allowedOrigins: ['https://app.example.com'],
+
+  // TLS
+  tls: {
+    key:  readFileSync('server-key.pem'),
+    cert: readFileSync('server-cert.pem'),
+  },
+
+  // Logging
+  logger: 'info',
+
+  // Hooks
+  hooks: {
+    onRateLimitExceeded: ({ clientId, event, protocol }) => {
+      console.warn(`[${protocol}] Rate limit hit: ${clientId} on "${event}"`);
+      // return false; // Uncomment to warn instead of disconnect
+    },
+    onClientJoinRoom: ({ clientId, room, metadata }) => {
+      if (room.startsWith('admin-') && metadata.get('role') !== 'admin') {
+        return false; // Reject — admins only
+      }
+    },
+    onClientConnect: ({ clientId, ip, protocol }) => {
+      console.log(`Connected: ${clientId} via ${protocol} from ${ip}`);
+    },
+    onClientDisconnect: ({ clientId, rooms }) => {
+      console.log(`Disconnected: ${clientId} was in ${rooms.size} room(s)`);
+    },
+  },
+});
+
+// Authentication middleware
+stelar.use((ctx, next) => {
+  const token = ctx.req?.headers?.authorization;
+  if (!token) return ctx.ack('error', { message: 'Token required' });
+  ctx.setMetadata('userId', getUserIdFromToken(token));
+  next();
+});
+
+stelar.onConnection((client) => {
+  client.emit('welcome', { id: client.id });
+});
+
+stelar.on('chat', (ctx) => {
+  ctx.broadcast('chat', ctx.data, ctx.id);
+});
+
+await stelar.start();
+console.log('Server ready on port', stelar.getPort());
+```

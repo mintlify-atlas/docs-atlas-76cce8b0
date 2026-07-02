@@ -1,0 +1,73 @@
+---
+title: "stelar-time-real: Production Real-Time for Node.js"
+sidebarTitle: "Introduction"
+description: "stelar-time-real is a zero-dependency Node.js real-time library implementing WebSocket (RFC 6455) and a custom binary TCP protocol using only built-in modules."
+---
+
+stelar-time-real is a production-grade real-time communication library built entirely from scratch for Node.js. It implements its own WebSocket protocol (RFC 6455) **and** a custom binary TCP protocol using only Node.js built-in modules — `http`, `net`, `crypto`, and `tls`. No `ws` package, no `engine.io`, no external dependencies of any kind. Every byte that travels across the network is controlled by the library, giving you total predictability, zero supply-chain risk, and no breaking changes from third-party updates.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Zero Dependencies" icon="shield-check">
+    `dependencies: {}`. No external packages — pure Node.js built-ins only. Instant installation, no vulnerability surface from third-party code.
+  </Card>
+  <Card title="Dual Protocol" icon="arrows-split-up-and-left">
+    WebSocket (RFC 6455) for browsers and TCP binary protocol for Node.js microservices run simultaneously on separate ports, sharing all server logic.
+  </Card>
+  <Card title="Rate Limiting" icon="gauge-high">
+    Token-bucket rate limiter per client, per event, or per IP address. Swap it out entirely with a custom `IRateLimiter` (Redis, MongoDB, etc.).
+  </Card>
+  <Card title="Rooms" icon="layer-group">
+    Clients join named rooms and receive targeted broadcasts. Rooms are cleaned up automatically when the last member disconnects.
+  </Card>
+  <Card title="ACK System" icon="rotate-left">
+    Request-response over real-time with `onAck` / `client.request()`. Configurable timeout, Promise-based, works on both WebSocket and TCP.
+  </Card>
+  <Card title="TLS / SSL" icon="lock">
+    Native `wss://` and TCP over TLS. Pass `tls: { key, cert }` to `StelarServer` — no extra setup needed.
+  </Card>
+  <Card title="Health Check" icon="heart-pulse">
+    Built-in `/health` HTTP endpoint returns live stats (connections, messages, rooms, memory, uptime). Compatible with Kubernetes, Docker, and load balancers.
+  </Card>
+  <Card title="TypeScript Support" icon="code">
+    Written in TypeScript with bundled `.d.ts` declarations. No `@types/*` package required.
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+stelar-time-real is designed for workloads where latency, predictability, and production reliability matter:
+
+- **Real-time chat** — messaging, notifications, typing indicators, presence
+- **Collaborative applications** — shared editors, whiteboards, live documents
+- **Internal microservices** — ultra-low-latency server-to-server communication via the binary TCP protocol
+- **Live dashboards** — metrics, monitoring, trading feeds, analytics
+- **Multiplayer games** — low-overhead binary frames, room-based fan-out
+- **IoT and connected devices** — lightweight TCP binary protocol reduces overhead on constrained devices
+- **Social platforms** — Discord-style channels, direct messages, broadcast notifications
+
+## Zero Runtime Dependencies
+
+<Note>
+  stelar-time-real has **zero runtime dependencies**. The `dependencies` field in `package.json` is intentionally empty. This means no third-party vulnerabilities, no supply-chain attacks, no breaking changes from upstream packages, and a minimal footprint in `node_modules`. Installing the package takes milliseconds.
+</Note>
+
+## Performance
+
+Benchmarked under a stress test with **50 WebSocket + 20 TCP clients** running simultaneously:
+
+| Metric | Value |
+|---|---|
+| Simultaneous connections | 70 |
+| RAM per connected client | ~58 KB |
+| Throughput | 3,425 msg/sec |
+| Stable heap | ~10 MB |
+| Memory leaks detected | None |
+| MaxListeners warnings | 0 |
+
+At ~58 KB per client, a server with **1 GB of RAM** can sustain approximately **17,000 simultaneous connections**.
+
+---
+
+Ready to get started? Head to the [Quickstart](/quickstart) to have a working server and client running in minutes.

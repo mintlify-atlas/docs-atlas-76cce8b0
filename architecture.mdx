@@ -1,0 +1,111 @@
+---
+title: "Dual-Protocol Architecture of stelar-time-real"
+sidebarTitle: "Architecture"
+description: "How stelar-time-real runs WebSocket (RFC 6455) and a custom 7-byte binary TCP protocol simultaneously, sharing rooms, ACK, middleware, and metrics across both."
+---
+
+stelar-time-real is designed around a single principle: total control over the network layer. Rather than wrapping a third-party WebSocket library, it implements RFC 6455 from scratch using Node.js `http` and `crypto`, and pairs it with a purpose-built binary TCP protocol implemented over `net` (and optionally `tls`). Both transports are first-class citizens — they share the same event handlers, rooms, broadcast system, ACK system, middleware stack, and metrics.
+
+## Dual Protocol
+
+The server starts two listeners: an HTTP server that handles WebSocket upgrades, and a raw TCP server (or TLS TCP server) for the binary protocol. Clients choose which transport to use based on their environment and requirements.
+
+```
+                    stelar-time-real Server
+                   ┌──────────────────────────┐
+                   │                          │
+   Browsers  ────► │  Port 3000 (WebSocket)  │
+   (ws://)         │         │                │
+                   │    Same logic            │
+   Node.js   ────► │  Port 3001 (Custom TCP) │
+   (tcp mode)      │         │                │
+                   │                          │
+                   └──────────────────────────┘
+```
+
+<Info>
+  Both protocols share **everything** at the application layer: event handlers registered with `.on()`, room membership and fan-out via `.to()`, broadcasts via `.broadcast()`, the ACK request-response system, the middleware chain registered with `.use()`, and all server metrics returned by `.getStats()`. A WebSocket client and a TCP client can be in the same room and exchange messages without any special handling.
+</Info>
+
+## WebSocket vs TCP
+
+| Aspect | WebSocket | Custom TCP |
+|---|---|---|
+| Browser support | ✅ Yes | ❌ No |
+| Node.js support | ✅ Yes | ✅ Yes |
+| Overhead per frame | 2–14 bytes (RFC 6455 header) | 7 bytes (custom header) |
+| Latency | Low | Ultra-low |
+| TLS | `wss://` via HTTP upgrade | Native TLS socket (`tls.connect`) |
+| Typical use case | Frontend web apps, browsers | Microservices, backend-to-backend |
+
+## Binary Protocol Format (TCP)
+
+The custom TCP protocol uses a compact 7-byte fixed header followed by a variable-length event name and payload. There is no null-delimiter — lengths are encoded explicitly in big-endian integers so the parser always knows exactly how many bytes to read.
+
+```
+┌──────────────┬──────────┬───────────────┬──────────────┬──────────────┐
+│ totalLen (4B) │ type (1B)│ eventLen (2B) │ event (N B)  │ payload      │
+│ Big Endian   │          │ Big Endian    │ UTF-8 string │ JSON/Binary  │
+└──────────────┴──────────┴───────────────┴──────────────┴──────────────┘
+```
+
+- **`totalLen` (4 bytes, BE)** — Total frame length in bytes, including the header itself.
+- **`type` (1 byte)** — Frame type identifier (see table below).
+- **`eventLen` (2 bytes, BE)** — Length of the UTF-8 event name string that follows.
+- **`event` (N bytes)** — UTF-8 event name.
+- **`payload` (remaining bytes)** — JSON-encoded data or raw binary, depending on frame type.
+
+### Frame Types
+
+| Code | Name | Description |
+|---|---|---|
+| `0` | JSON | Event with a JSON-encoded payload |
+| `1` | Binary | Event with a raw binary payload (no JSON encoding) |
+| `2` | Ping | Client heartbeat request |
+| `3` | Pong | Server heartbeat response |
+| `4` | ACK Request | Request that expects a response from the server |
+| `5` | ACK Response | Server's response to an ACK Request |
+| `6` | Connect | Initial connection frame (server sends assigned client ID) |
+| `7` | Disconnect | Graceful disconnection frame |
+| `8` | Join Room | Client requests to join a named room |
+| `9` | Leave Room | Client requests to leave a named room |
+| `10` | Error | Error frame from server to client |
+
+## WebSocket Implementation (RFC 6455)
+
+stelar-time-real implements the full WebSocket handshake and framing layer using only Node.js `http` and `crypto`. The `ws` npm package is never used.
+
+The implementation covers:
+
+- **Handshake** — Computes `Sec-WebSocket-Accept` using SHA-1 and base64 per RFC 6455 §4
+- **Framing** — Full frame parsing and construction for text, binary, ping, pong, and close opcodes
+- **Masking** — Applies and removes the XOR mask required on client-to-server frames (RFC 6455 §5.3)
+- **Fragmentation** — Correctly assembles fragmented multi-frame messages
+- **Close codes** — All standard close codes supported (`1000`, `1001`, `1002`, `1007`, `1008`, `1009`, etc.)
+- **RSV bit validation** — Frames with unexpected RSV bits set are rejected with a protocol error close
+- **PING / PONG** — Server responds to client PING frames with a PONG containing the same payload
+
+<Note>
+  No external `ws` package is used at any point. All WebSocket framing logic lives in `src/websocket.ts` and relies exclusively on Node.js built-in modules. This means no third-party CVEs can affect the WebSocket layer.
+</Note>
+
+## Project Structure
+
+```
+stelar-time-real/
+├── src/
+│   ├── index.ts        # StelarServer — HTTP, WebSocket upgrade, TCP listener, rooms, ACK, middleware
+│   ├── client.ts       # StelarClient — Browser WS, Node.js WS, binary TCP, reconnection, message queue
+│   ├── protocol.ts     # Binary TCP protocol — frame encode/decode, FrameParser, 11 frame types
+│   ├── websocket.ts    # Manual WebSocket RFC 6455 — WSFrameParser, frame builder, masking, close codes
+│   └── logger.ts       # Logger with configurable levels (debug, info, warn, error, silent)
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+Each file has a single, well-defined responsibility:
+
+- **`index.ts`** owns the server lifecycle, connection management, rate limiting, health endpoint, graceful shutdown, and the dispatch loop that routes frames to registered event handlers.
+- **`client.ts`** handles all three connection paths (browser `WebSocket` API, Node.js WebSocket via `http.request` upgrade, and raw TCP via `net.createConnection`), plus reconnection with exponential backoff, message queuing, and the ACK Promise system.
+- **`protocol.ts`** and **`websocket.ts`** are pure encoding/decoding modules with no I/O — they can be tested and reasoned about in complete isolation from the networking layer.

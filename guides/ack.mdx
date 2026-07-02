@@ -1,0 +1,124 @@
+---
+title: "Request-Response Patterns with the ACK System"
+sidebarTitle: "ACK"
+description: "The ACK system adds Promise-based request-response semantics over the real-time protocol with a configurable per-request timeout and automatic correlation."
+---
+
+The ACK (acknowledgement) system brings request-response semantics to stelar-time-real's persistent connections. Unlike a plain `emit`, an ACK request waits for the server to process the message and return a value — the client side is a `Promise` that resolves with the server's return value or rejects if the server throws or the timeout expires. Both WebSocket and TCP clients support ACK with identical behavior.
+
+## Server side: registering ACK handlers
+
+Use `stelar.onAck()` to register a named handler. Whatever value you **return** is sent back to the client. If you **throw**, an error response is sent instead:
+
+```javascript
+// Return a value — sent back to the client
+stelar.onAck('getUsers', (ctx) => {
+  return { users: ['John', 'Mary', 'Peter'] };
+});
+
+// Throw an error — the client's Promise rejects
+stelar.onAck('validateToken', (ctx) => {
+  const valid = validateToken(ctx.data.token);
+  if (!valid) throw new Error('Invalid token');
+  return { userId: 123 };
+});
+```
+
+The handler receives the full `StelarContext` object, so you can read `ctx.data`, call `ctx.getMetadata()`, or perform any side effects before returning.
+
+## Client side: sending a request
+
+Use `client.request(event, data, ackName)` to send an ACK request and get back a `Promise`:
+
+```javascript
+const users = await client.request('getUsers', {}, 'getUsers');
+console.log(users); // { users: ['John', 'Mary', 'Peter'] }
+```
+
+The third argument (`ackName`) tells the server which `onAck` handler to invoke.
+
+## Full working example
+
+```javascript
+// --- Server ---
+import { StelarServer } from 'stelar-time-real';
+
+const stelar = new StelarServer({ port: 3000 });
+
+stelar.onAck('getUser', (ctx) => {
+  return { id: ctx.data.id, name: 'John', role: ctx.getMetadata('role') };
+});
+
+stelar.onAck('validateToken', (ctx) => {
+  const valid = validateToken(ctx.data.token);
+  if (!valid) throw new Error('Invalid token');
+  return { userId: 123 };
+});
+
+await stelar.start();
+
+// --- Client ---
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('localhost:3000');
+client.connect();
+
+client.on('connect', async () => {
+  // Successful request
+  const user = await client.request('getUser', { id: 1 }, 'getUser');
+  console.log(user); // { id: 1, name: 'John', role: 'user' }
+
+  // Request that may fail
+  try {
+    const result = await client.request('validateToken', { token: 'abc' }, 'validateToken');
+    console.log('Valid token, userId:', result.userId);
+  } catch (err) {
+    console.log('Invalid token:', err.message);
+  }
+});
+```
+
+## Error handling
+
+Wrap `client.request()` in a `try/catch` block to handle both server-thrown errors and timeouts:
+
+```javascript
+try {
+  const result = await client.request('validateToken', { token: 'abc' }, 'validateToken');
+} catch (err) {
+  console.log('Invalid token');
+}
+```
+
+If the server's handler throws, the error is propagated to the client as a rejection. If no response arrives within `ackTimeout`, the Promise also rejects with a timeout error.
+
+## Configuring the ACK timeout
+
+Set `ackTimeout` in the client options. The default is 5000 ms:
+
+```javascript
+const client = new StelarClient('localhost:3000', {
+  ackTimeout: 5000, // Milliseconds to wait for a response
+});
+```
+
+## Manually responding with ctx.ack()
+
+Inside a regular event handler (registered with `stelar.on()`), you can send an ACK response manually using `ctx.ack()`:
+
+```javascript
+stelar.on('message', (ctx) => {
+  // Do some work, then respond to the ACK request
+  ctx.ack('myAck', { received: true, timestamp: Date.now() });
+});
+```
+
+This is useful when the response is asynchronous and you need to call it from a callback or after an `await`.
+
+<Warning>
+  If the server does not call `ctx.ack()` or return a value from `onAck()` within the `ackTimeout` window, the client's Promise will reject with a timeout error. Make sure every ACK handler either returns a value or throws explicitly so the client always gets a timely response.
+</Warning>
+
+<Tip>
+  ACK is ideal for authentication flows on connection. After the client connects, it can immediately call `client.request('validateToken', { token }, 'validateToken')` to verify credentials and receive the user profile in a single round trip — before sending any other events.
+</Tip>

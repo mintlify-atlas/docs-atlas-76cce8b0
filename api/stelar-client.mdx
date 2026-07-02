@@ -1,0 +1,575 @@
+---
+title: "StelarClient — Complete Method Reference"
+sidebarTitle: "StelarClient"
+description: "Full reference for all StelarClient methods — connection, sending, rooms, ACK requests, state/metrics, and runtime config."
+---
+
+`StelarClient` connects to a `StelarServer` via WebSocket (default) or custom binary TCP. It works in both browser and Node.js environments without any external dependencies. The client ships with automatic reconnection using exponential backoff, a configurable message queue that persists sends across disconnections, and a Promise-based ACK request/response system.
+
+## Import
+
+```typescript
+// Named export (recommended)
+import { StelarClient } from 'stelar-time-real';
+
+// Client-only subpath
+import { StelarClient } from 'stelar-time-real/client';
+```
+
+## Constructor
+
+```typescript
+new StelarClient(urlOrPort?: string | number, options?: StelarClientOptions)
+```
+
+The first argument accepts several formats:
+
+| Format | Protocol | Example |
+|--------|----------|---------|
+| `number` | `ws://localhost:<port>` | `new StelarClient(3000)` |
+| `"host:port"` | `ws://host:port` | `new StelarClient('localhost:3000')` |
+| `"ws://…"` / `"wss://…"` | WebSocket (plain / TLS) | `new StelarClient('wss://api.example.com')` |
+| `"host:port"` with `mode: 'tcp'` | Custom binary TCP | `new StelarClient('localhost:3001', { mode: 'tcp' })` |
+
+When no argument is provided the client defaults to `ws://localhost:3000`.
+
+**Options** (`StelarClientOptions`):
+
+```typescript
+{
+  // Reconnection
+  reconnection?: boolean;           // Default: true
+  reconnectionAttempts?: number;    // Default: 10
+  reconnectionDelay?: number;       // Base delay in ms. Default: 1000
+  maxReconnectionDelay?: number;    // Cap in ms. Default: 30000
+
+  // Protocol
+  mode?: 'ws' | 'tcp';             // Default: 'ws'
+  maxPayloadSize?: number;          // Default: 10 MB
+  maxFrameSize?: number;            // Default: 10 MB
+  compression?: boolean;            // permessage-deflate (WS only). Default: false
+
+  // Timeouts
+  heartbeatInterval?: number;       // Ping interval in ms. Default: 30000
+  ackTimeout?: number;              // ACK / connect timeout in ms. Default: 5000
+
+  // Message queue
+  messageQueueSize?: number;        // Max queued messages while disconnected. Default: 100
+
+  // Security
+  tls?: boolean;                    // Enable TLS for wss:// or TCP+TLS. Default: false
+  rejectUnauthorized?: boolean;     // Validate TLS cert. Default: true
+  headers?: Record<string, string>; // Extra headers for the WS handshake
+
+  // Observability
+  logger?: Logger | LogLevel | false; // 'debug'|'info'|'warn'|'error'|'silent'. Default: 'warn'
+
+  // Advanced
+  customReconnectDelay?: (attempt: number, baseDelay: number, maxDelay: number) => number;
+  hooks?: StelarClientHooks;
+}
+```
+
+---
+
+## Connection Methods
+
+### `.connect(callback?)`
+
+```typescript
+connect(callback?: () => void): this
+```
+
+Initiates a connection to the server. Returns `this` for chaining. If the client is already connected or connecting, the call is a no-op.
+
+The optional `callback` is called once the connection state reaches `'connected'`. It is polled internally every 50 ms and has a safety timeout equal to `ackTimeout`.
+
+```javascript
+client.connect(() => {
+  console.log('Ready to send messages');
+});
+```
+
+Prefer listening to the `'connect'` event for more robust lifecycle handling.
+
+---
+
+### `.disconnect()`
+
+```typescript
+disconnect(): this
+```
+
+Closes the connection and releases all internal resources: the heartbeat timer, pending ACK timeouts, the reconnect timer, and the underlying socket. Sets the client state to `'disconnected'` and prevents any automatic reconnection attempt.
+
+```javascript
+client.disconnect();
+```
+
+---
+
+## Event Listeners
+
+All listener methods return `this` and can be chained.
+
+### `.on(event, handler)`
+
+```typescript
+on(event: string, handler: (data: unknown) => void): this
+```
+
+Registers a persistent listener for `event`. Only one handler per event name is stored — calling `.on()` again for the same event overwrites the previous handler.
+
+```javascript
+client.on('chat', (data) => console.log('New message:', data));
+```
+
+---
+
+### `.off(event, handler)`
+
+```typescript
+off(event: string, handler: (data: unknown) => void): this
+```
+
+Removes the listener for `event`, but only if the stored handler is the exact same function reference passed in.
+
+```javascript
+const handler = (data) => console.log(data);
+client.on('update', handler);
+client.off('update', handler); // removed
+```
+
+---
+
+### `.once(event, handler)`
+
+```typescript
+once(event: string, handler: (data: unknown) => void): this
+```
+
+Registers a one-shot listener that automatically removes itself after the first invocation.
+
+```javascript
+client.once('welcome', (data) => {
+  console.log('Server said:', data.message);
+});
+```
+
+---
+
+### `.onAll(handler)`
+
+```typescript
+onAll(handler: (d: {
+  event: string;
+  data: unknown;
+  isBinary?: boolean;
+  buffer?: ArrayBuffer;
+}) => void): this
+```
+
+Registers a wildcard listener that fires for **every** incoming message, regardless of event name. Receives the full message envelope including `isBinary` and `buffer` fields for binary frames.
+
+```javascript
+client.onAll(({ event, data, isBinary }) => {
+  console.log(`[${event}]`, isBinary ? '<binary>' : data);
+});
+```
+
+---
+
+### `.onAck(name, handler)`
+
+```typescript
+onAck(name: string, handler: (data: unknown) => void): this
+```
+
+Registers a persistent handler for ACK response frames identified by `name`. Unlike `.request()`, this does not time out and does not return a Promise — it fires every time the server sends an ACK response with that name.
+
+```javascript
+client.onAck('pong', (data) => console.log('ACK received:', data));
+```
+
+---
+
+### `.removeAllListeners(event?)`
+
+```typescript
+removeAllListeners(event?: string): this
+```
+
+When called with an event name, removes the handler for that specific event. When called with no argument, clears all registered event handlers.
+
+```javascript
+client.removeAllListeners('chat');   // remove one
+client.removeAllListeners();          // remove all
+```
+
+---
+
+## Sending Messages
+
+### `.emit(event, data?, opts?)`
+
+```typescript
+emit(event: string, data?: unknown, opts?: StelarEmitOptions): this
+```
+
+Sends a JSON event to the server. If the client is not currently connected and `reconnection` is enabled, the message is pushed onto the internal queue and delivered automatically after the next successful reconnection.
+
+`StelarEmitOptions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ack` | `string` | ACK response name the server should reply with |
+| `_correlationId` | `string` | Internal correlation token (used by `.request()`) |
+
+```javascript
+// Fire-and-forget
+client.emit('chat', { text: 'Hello!' });
+
+// With ACK — server must call ctx.ack('chatSent', ...) 
+client.emit('chat', { text: 'Hello!' }, { ack: 'chatSent' });
+```
+
+---
+
+### `.emitBinary(event, data)`
+
+```typescript
+emitBinary(event: string, data: ArrayBuffer): this
+```
+
+Sends a raw binary payload associated with `event`. The frame is encoded using a length-prefixed header (4 bytes for header length) followed by the binary payload. Only operates when already connected — binary messages are **not** queued on disconnect.
+
+```javascript
+const buf = await file.arrayBuffer();
+client.emitBinary('upload', buf);
+```
+
+---
+
+### `.sendFile(file)`
+
+```typescript
+sendFile(file: ArrayBuffer): this
+```
+
+Convenience wrapper that calls `emitBinary('file', file)`.
+
+```javascript
+const buf = await fileInput.files[0].arrayBuffer();
+client.sendFile(buf);
+```
+
+---
+
+### `.sendImage(blob)`
+
+```typescript
+sendImage(blob: ArrayBuffer): this
+```
+
+Convenience wrapper that calls `emitBinary('image', blob)`.
+
+```javascript
+const buf = await imageBlob.arrayBuffer();
+client.sendImage(buf);
+```
+
+---
+
+### `.request(event, data, ackName)`
+
+```typescript
+request(event: string, data: unknown, ackName: string): Promise<unknown>
+```
+
+Sends `event` with `data` and returns a `Promise` that resolves with the server's ACK response payload. The server must call `ctx.ack(ackName, result)` to resolve the promise.
+
+If the server does not respond within `ackTimeout` milliseconds (default `5000`), the promise rejects with `Error: ACK '<ackName>' timeout`.
+
+Each call generates a unique correlation ID so concurrent requests with the same `ackName` are matched independently.
+
+```javascript
+try {
+  const user = await client.request('getUser', { id: 42 }, 'getUser');
+  console.log(user); // { id: 42, name: 'Alice' }
+} catch (err) {
+  console.error('Request failed:', err.message);
+}
+```
+
+---
+
+## Rooms
+
+### `.joinRoom(room)`
+
+```typescript
+joinRoom(room: string): this
+```
+
+Sends a join-room request to the server. In WebSocket mode, emits the `'join-room'` event. In TCP mode, sends a dedicated `JOIN_ROOM` binary frame.
+
+```javascript
+client.joinRoom('general');
+client.joinRoom('project-alpha');
+```
+
+---
+
+### `.leaveRoom(room)`
+
+```typescript
+leaveRoom(room: string): this
+```
+
+Sends a leave-room request to the server. In WebSocket mode, emits the `'leave-room'` event. In TCP mode, sends a dedicated `LEAVE_ROOM` binary frame.
+
+```javascript
+client.leaveRoom('general');
+```
+
+---
+
+## State & Metrics
+
+### `.isConnected()`
+
+```typescript
+isConnected(): boolean
+```
+
+Returns `true` only when the internal state is exactly `'connected'`.
+
+---
+
+### `.getState()`
+
+```typescript
+getState(): 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
+```
+
+Returns the current connection state string. See [Client Events — Connection State Machine](/api/client-events#connection-state-machine) for the full transition table.
+
+---
+
+### `.getId()`
+
+```typescript
+getId(): string | null
+```
+
+Returns the unique client ID assigned by the server on connection, or `null` if not yet connected. In TCP mode the ID is delivered in the initial `CONNECT` frame.
+
+---
+
+### `.getUrl()`
+
+```typescript
+getUrl(): string
+```
+
+Returns the current target URL (always normalised to a `ws://` or `wss://` string).
+
+---
+
+### `.setUrl(url)`
+
+```typescript
+setUrl(url: string): this
+```
+
+Overrides the target URL. Takes effect on the next `.connect()` call. Has no effect on an already-open connection.
+
+```javascript
+client.setUrl('wss://us-east.example.com');
+client.connect();
+```
+
+---
+
+### `.getMessagesSent()`
+
+```typescript
+getMessagesSent(): number
+```
+
+Returns the cumulative count of messages successfully written to the socket since the client was created.
+
+---
+
+### `.getMessagesReceived()`
+
+```typescript
+getMessagesReceived(): number
+```
+
+Returns the cumulative count of frames received from the server since the client was created.
+
+---
+
+### `.getLastError()`
+
+```typescript
+getLastError(): Error | null
+```
+
+Returns the last `Error` captured from a socket error event or failed connect attempt, or `null` if no error has occurred.
+
+---
+
+### `.getConnectTime()`
+
+```typescript
+getConnectTime(): number
+```
+
+Returns the Unix timestamp (milliseconds, from `Date.now()`) of the last successful connection. Returns `0` if the client has never connected.
+
+---
+
+### `.getQueueSize()`
+
+```typescript
+getQueueSize(): number
+```
+
+Returns the number of messages currently sitting in the offline queue waiting to be delivered after reconnection.
+
+---
+
+## Runtime Config
+
+### `.updateOptions(options)`
+
+```typescript
+updateOptions(options: Partial<StelarClientOptions>): this
+```
+
+Merges the supplied options into the active configuration **without reconnecting**. All fields of `StelarClientOptions` are accepted; unrecognised keys are silently ignored. Hook keys are merged shallowly so you can replace individual hooks.
+
+The following options can be updated at runtime: `reconnection`, `reconnectionAttempts`, `reconnectionDelay`, `maxReconnectionDelay`, `heartbeatInterval`, `ackTimeout`, `maxPayloadSize`, `maxFrameSize`, `messageQueueSize`, `headers`, `compression`, `customReconnectDelay`, and `hooks`.
+
+```javascript
+client.updateOptions({
+  heartbeatInterval: 15000,
+  ackTimeout: 10000,
+  hooks: {
+    onBeforeEmit: ({ event }) => {
+      if (event === 'debug') return false;
+    },
+  },
+});
+```
+
+---
+
+### `.getOptions()`
+
+```typescript
+getOptions(): Readonly<{
+  reconnection: boolean;
+  reconnectionAttempts: number;
+  reconnectionDelay: number;
+  maxReconnectionDelay: number;
+  heartbeatInterval: number;
+  ackTimeout: number;
+  mode: 'ws' | 'tcp';
+  maxPayloadSize: number;
+  messageQueueSize: number;
+  compression: boolean;
+  hasCustomReconnectDelay: boolean;
+  hooks: string[];  // names of registered hook keys
+}>
+```
+
+Returns a frozen snapshot of the current configuration. The `hooks` field contains the names of hook keys that have handlers registered.
+
+```javascript
+const opts = client.getOptions();
+console.log(opts.mode);             // 'ws'
+console.log(opts.hooks);            // ['onStateChange', 'onError']
+```
+
+---
+
+## Full Example
+
+```javascript
+import { StelarClient } from 'stelar-time-real';
+
+const client = new StelarClient('wss://api.example.com', {
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  maxReconnectionDelay: 30000,
+  ackTimeout: 5000,
+  messageQueueSize: 50,
+  hooks: {
+    onStateChange: ({ from, to }) => {
+      console.log(`Connection: ${from} → ${to}`);
+      if (to === 'reconnecting') showReconnectBanner();
+      if (to === 'connected')    hideReconnectBanner();
+    },
+    onQueueDrained: ({ count }) => {
+      console.log(`${count} queued messages delivered after reconnect`);
+    },
+    onError: ({ error, context }) => {
+      errorTracker.capture(error, { tags: { context } });
+    },
+  },
+});
+
+// Lifecycle events
+client.on('connect', () => {
+  console.log('Connected — client ID:', client.getId());
+  client.joinRoom('general');
+});
+
+client.on('disconnect', ({ code, reason }) => {
+  console.warn(`Disconnected: ${code} ${reason}`);
+});
+
+client.on('reconnecting', (attempt) => {
+  console.log(`Reconnect attempt #${attempt}`);
+});
+
+client.on('reconnect_failed', () => {
+  console.error('Could not reconnect — giving up');
+});
+
+// Application events
+client.on('chat', (msg) => {
+  appendMessage(msg);
+});
+
+client.onAll(({ event, data }) => {
+  analytics.track(event, data);
+});
+
+// Connect
+client.connect();
+
+// Fire-and-forget
+client.emit('chat', { text: 'Hello!' });
+
+// Queued while disconnected — auto-sent on reconnect
+client.emit('presence', { status: 'online' });
+
+// Promise-based request
+const profile = await client.request('getProfile', { id: 1 }, 'getProfile');
+console.log('Profile:', profile);
+
+// Binary upload
+const buf = await file.arrayBuffer();
+client.sendFile(buf);
+
+// Metrics
+console.log('Sent:', client.getMessagesSent());
+console.log('Received:', client.getMessagesReceived());
+console.log('Queue depth:', client.getQueueSize());
+console.log('State:', client.getState());
+```
